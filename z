@@ -1,0 +1,205 @@
+-- =========================================================================
+-- CALLES DE BQM - RAINBOW 2D ESP EXCLUSIVO PARA VEHÍCULOS
+-- Inspección del mapa: Los autos residen en Workspace.Vehiclesfix y
+-- contienen la instancia 'DriverSeat' (SRT, Humvee, Civic, Mazede, C8, etc.)
+-- Motor: 2D Bounding Box Projection + Rainbow Cycle Dinámico (HSV)
+-- Target: Xeno Executor / Luau
+-- =========================================================================
+
+local RunService = game:GetService("RunService")
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+
+local Camera = Workspace.CurrentCamera
+local LocalPlayer = Players.LocalPlayer
+
+-- Parámetros del ESP Rainbow
+local SETTINGS = {
+    Thickness = 2,
+    RainbowSpeed = 0.6,        -- Velocidad de rotación cromática
+    MaxDistance = 2500,        -- Rango en studs
+    ShowText = true,           -- Mostrar nombre del modelo y distancia
+    TextSize = 13,
+}
+
+-- Tabla de seguimiento
+local TrackedVehicles = {}
+
+-- Comprobación exacta según la jerarquía del .rbxlx de Calles de BQM
+local function IsBQMVehicle(model)
+    if not model or not model:IsA("Model") then return false end
+
+    -- 1. Pertenece a la carpeta Vehiclesfix
+    local vehiclesFolder = Workspace:FindFirstChild("Vehiclesfix")
+    if vehiclesFolder and model.Parent == vehiclesFolder then
+        return true
+    end
+
+    -- 2. Posee DriverSeat (estándar en todos los autos de BQM)
+    if model:FindFirstChild("DriverSeat") and model.DriverSeat:IsA("VehicleSeat") then
+        return true
+    end
+
+    -- 3. Fallback genérico por VehicleSeat en el modelo
+    if model:FindFirstChildWhichIsA("VehicleSeat", true) then
+        return true
+    end
+
+    return false
+end
+
+-- Generador de objetos Drawing
+local function CreateVehicleDrawings()
+    local box = Drawing.new("Square")
+    box.Thickness = SETTINGS.Thickness
+    box.Filled = false
+    box.Transparency = 1
+    box.Visible = false
+
+    local label = Drawing.new("Text")
+    label.Size = SETTINGS.TextSize
+    label.Center = true
+    label.Outline = true
+    label.OutlineColor = Color3.fromRGB(0, 0, 0)
+    label.Visible = false
+
+    return {Box = box, Label = label}
+end
+
+-- Registrar auto
+local function RegisterVehicle(model)
+    if TrackedVehicles[model] then return end
+
+    local drawings = CreateVehicleDrawings()
+    TrackedVehicles[model] = {
+        Model = model,
+        Drawings = drawings,
+    }
+end
+
+-- Desmontar auto destruido
+local function UnregisterVehicle(model)
+    local entry = TrackedVehicles[model]
+    if entry then
+        pcall(function()
+            entry.Drawings.Box:Remove()
+            entry.Drawings.Label:Remove()
+        end)
+        TrackedVehicles[model] = nil
+    end
+end
+
+-- Indexar carpeta Vehiclesfix y Workspace
+local function ScanInitialVehicles()
+    local vehFolder = Workspace:FindFirstChild("Vehiclesfix")
+    if vehFolder then
+        for _, child in ipairs(vehFolder:GetChildren()) do
+            if IsBQMVehicle(child) then
+                RegisterVehicle(child)
+            end
+        end
+    end
+
+    for _, obj in ipairs(Workspace:GetChildren()) do
+        if IsBQMVehicle(obj) then
+            RegisterVehicle(obj)
+        end
+    end
+end
+
+ScanInitialVehicles()
+
+-- Detectar autos nuevos que spawneen o entren al mapa
+Workspace.DescendantAdded:Connect(function(descendant)
+    if descendant:IsA("Model") and IsBQMVehicle(descendant) then
+        RegisterVehicle(descendant)
+    elseif descendant:IsA("VehicleSeat") and descendant.Parent and descendant.Parent:IsA("Model") then
+        RegisterVehicle(descendant.Parent)
+    end
+end)
+
+Workspace.DescendantRemoving:Connect(function(descendant)
+    if TrackedVehicles[descendant] then
+        UnregisterVehicle(descendant)
+    end
+end)
+
+-- Bucle de renderizado 2D Rainbow por frame
+RunService.RenderStepped:Connect(function()
+    -- Cálculo del color Rainbow mediante HSV continuo
+    local rainbowColor = Color3.fromHSV((tick() * SETTINGS.RainbowSpeed) % 1, 1, 1)
+
+    local myChar = LocalPlayer.Character
+    local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    local myPos = myRoot and myRoot.Position or Camera.CFrame.Position
+
+    for model, data in pairs(TrackedVehicles) do
+        local box = data.Drawings.Box
+        local label = data.Drawings.Label
+
+        if not model or not model.Parent then
+            UnregisterVehicle(model)
+        else
+            local cframe, size = model:GetBoundingBox()
+            local vehPos = cframe.Position
+            local distance = (vehPos - myPos).Magnitude
+
+            if distance > SETTINGS.MaxDistance then
+                box.Visible = false
+                label.Visible = false
+            else
+                local screenPos, onScreen = Camera:WorldToViewportPoint(vehPos)
+
+                if onScreen then
+                    -- Proyección 3D a 2D de los 8 vértices del chasis
+                    local extX = size.X / 2
+                    local extY = size.Y / 2
+                    local extZ = size.Z / 2
+
+                    local corners = {
+                        cframe * CFrame.new(extX, extY, extZ),
+                        cframe * CFrame.new(-extX, extY, extZ),
+                        cframe * CFrame.new(extX, -extY, extZ),
+                        cframe * CFrame.new(-extX, -extY, extZ),
+                        cframe * CFrame.new(extX, extY, -extZ),
+                        cframe * CFrame.new(-extX, extY, -extZ),
+                        cframe * CFrame.new(extX, -extY, -extZ),
+                        cframe * CFrame.new(-extX, -extY, -extZ),
+                    }
+
+                    local minX, minY = math.huge, math.huge
+                    local maxX, maxY = -math.huge, -math.huge
+
+                    for i = 1, 8 do
+                        local p = Camera:WorldToViewportPoint(corners[i].Position)
+                        if p.X < minX then minX = p.X end
+                        if p.X > maxX then maxX = p.X end
+                        if p.Y < minY then minY = p.Y end
+                        if p.Y > maxY then maxY = p.Y end
+                    end
+
+                    -- Posicionar caja 2D Rainbow
+                    box.Size = Vector2.new(maxX - minX, maxY - minY)
+                    box.Position = Vector2.new(minX, minY)
+                    box.Color = rainbowColor
+                    box.Visible = true
+
+                    -- Texto opcional
+                    if SETTINGS.ShowText then
+                        label.Text = string.format("%s [%dm]", model.Name, math.floor(distance))
+                        label.Position = Vector2.new(minX + ((maxX - minX) / 2), minY - (SETTINGS.TextSize + 4))
+                        label.Color = rainbowColor
+                        label.Visible = true
+                    else
+                        label.Visible = false
+                    end
+                else
+                    box.Visible = false
+                    label.Visible = false
+                end
+            end
+        end
+    end
+end)
+
+print("[BQM] Rainbow 2D Vehicle ESP montado en Xeno.")
