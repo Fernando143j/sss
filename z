@@ -780,17 +780,19 @@ local function f2_hasSelectedRod(targetRodName)
     return nil
 end
 
-local function purgeFishingInventory()
-    local target = selectedRodToBuy or "FishingRodPro"
-    local hasTarget = f2_hasSelectedRod(target)
-    if hasTarget then return end
-
+local function purgeAllFishingGear()
     local itemsToDrop = {}
     local function checkContainer(cont)
         if not cont then return end
         for _, ch in ipairs(cont:GetChildren()) do
-            if ch:IsA("Tool") and (ROD_TIERS[ch.Name] or BAIT_NAMES[ch.Name]) then
-                table.insert(itemsToDrop, ch)
+            if ch:IsA("Tool") then
+                local name = ch.Name
+                local kind = ch:GetAttribute("MD_FarmKind")
+                local isRod = (ROD_TIERS[name] ~= nil) or (ch:GetAttribute("MD_FishingRod") == true) or (kind == "rod")
+                local isBait = (BAIT_NAMES[name] == true) or (kind == "bait")
+                if isRod or isBait then
+                    table.insert(itemsToDrop, ch)
+                end
             end
         end
     end
@@ -798,6 +800,8 @@ local function purgeFishingInventory()
     if char then checkContainer(char) end
 
     if #itemsToDrop > 0 then
+        pcall(function() hum:UnequipTools() end)
+        task.wait(0.2)
         if hrp and hrp.Parent then
             hrp.CFrame = hrp.CFrame + Vector3.new(0, 5, 0)
             hrp.AssemblyLinearVelocity = Vector3.zero
@@ -811,8 +815,6 @@ local function purgeFishingInventory()
 
         for _, tool in ipairs(itemsToDrop) do
             if tool and tool.Parent then
-                pcall(function() hum:UnequipTools() end)
-                task.wait(0.1)
                 if houseR then
                     pcall(function() houseR:FireServer("DropFarm", tool) end)
                 end
@@ -821,23 +823,22 @@ local function purgeFishingInventory()
                     pcall(function() itemsEv:FireServer("Drop", tool.Name) end)
                     pcall(function() itemsEv:FireServer("DropStack", { id = tool.Name, amount = 9999, all = true }) end)
                 end
-                task.wait(0.15)
+                task.wait(0.2)
             end
         end
 
-        task.wait(0.3)
+        task.wait(0.4)
         if hrp and hrp.Parent then
             hrp.Anchored = false
             hrp.AssemblyLinearVelocity = Vector3.zero
             hrp.AssemblyAngularVelocity = Vector3.zero
         end
+        task.wait(0.3)
     end
 end
 
 local function canAffordSelectedRod()
     local target = selectedRodToBuy or "FishingRodPro"
-    if f2_hasSelectedRod(target) then return true end
-
     local cash = getCurrentCash()
     local needed = ROD_BUDGETS[target] or 2050
 
@@ -1181,16 +1182,14 @@ local function fish2Setup()
     if not houseR then return false end
 
     local rodToBuy = selectedRodToBuy or "FishingRodPro"
-    local hasSpecificRod = f2_hasSelectedRod(rodToBuy) ~= nil
+    local rod = f2_hasSelectedRod(rodToBuy)
+    local bait = f2_getBait()
 
-    local rod, _  = f2_getBestRod()
-    local bait, _ = f2_getBait()
-    local needRod  = not hasSpecificRod
-    local needBait = (bait == nil)
-
-    if not needRod and not needBait then
+    if rod and bait then
         pcall(function() hum:EquipTool(rod) end)
         task.wait(0.3)
+        pcall(function() houseR:FireServer("EquipFarm", rod) end)
+        pcall(function() houseR:FireServer("EquipFishingBait", bait) end)
         ensureBaitLoaded(rod, bait)
         return true
     end
@@ -1203,7 +1202,7 @@ local function fish2Setup()
         return false
     end
 
-    purgeFishingInventory()
+    purgeAllFishingGear()
 
     local baitToBuy = ROD_BAIT[rodToBuy] or "WormtecRegular"
 
@@ -1216,40 +1215,35 @@ local function fish2Setup()
     pcall(function() houseR:FireServer("OpenFishing") end)
     task.wait(1.0)
 
-    if needRod then
+    pcall(function() houseR:FireServer("BuyFishing", rodToBuy) end)
+    local waited = 0
+    while not f2_hasSelectedRod(rodToBuy) and waited < 6 do
+        task.wait(0.4)
+        waited += 0.4
+    end
+    if not f2_hasSelectedRod(rodToBuy) then
+        task.wait(1.0)
         pcall(function() houseR:FireServer("BuyFishing", rodToBuy) end)
-        local waited = 0
-        while not f2_hasSelectedRod(rodToBuy) and waited < 6 do
-            task.wait(0.4)
-            waited += 0.4
-        end
-        if not f2_hasSelectedRod(rodToBuy) then
-            task.wait(1.0)
-            pcall(function() houseR:FireServer("BuyFishing", rodToBuy) end)
-            task.wait(1.5)
-        end
-        rod = f2_hasSelectedRod(rodToBuy) or f2_getBestRod()
-        if rod then
-            baitToBuy = ROD_BAIT[rod.Name] or "WormtecRegular"
-        end
+        task.wait(1.5)
+    end
+    rod = f2_hasSelectedRod(rodToBuy) or f2_getBestRod()
+
+    task.wait(0.5)
+    pcall(function() houseR:FireServer("BuyFishing", baitToBuy, BAIT_BUY_QTY) end)
+    waited = 0
+    while f2_getBait() == nil and waited < 6 do
+        task.wait(0.4)
+        waited += 0.4
     end
 
-    if needBait then
-        task.wait(0.5)
-        pcall(function() houseR:FireServer("BuyFishing", baitToBuy, BAIT_BUY_QTY) end)
-        local waited = 0
-        while f2_getBait() == nil and waited < 6 do
-            task.wait(0.4)
-            waited += 0.4
-        end
-    end
-
-    rod = f2_getBestRod()
+    rod = f2_hasSelectedRod(rodToBuy) or f2_getBestRod()
     bait = f2_getBait()
     if not rod or not bait then return false end
 
     pcall(function() hum:EquipTool(rod) end)
     task.wait(0.3)
+    pcall(function() houseR:FireServer("EquipFarm", rod) end)
+    pcall(function() houseR:FireServer("EquipFishingBait", bait) end)
     ensureBaitLoaded(rod, bait)
     return true
 end
@@ -1711,7 +1705,7 @@ local function fishLoop()
         castAccepted = false
         castInProgress = true
 
-        local castTarget = targetCFrameParam.Position + (targetCFrameParam.LookVector * 20)
+        local castTarget = targetCFrameParam.Position + (targetCFrameParam.LookVector * 30) - Vector3.new(0, 4, 0)
         pcall(function()
             fishRemote:FireServer("Cast", castTarget)
         end)
@@ -1933,7 +1927,7 @@ autoFishToggle = Tabs.Farm2:Toggle({
                 end)
                 return
             end
-            purgeFishingInventory()
+            purgeAllFishingGear()
             if hrp and hrp.Parent then
                 fishSavedOrigin = hrp.CFrame
             end
