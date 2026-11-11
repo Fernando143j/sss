@@ -742,6 +742,119 @@ local ROD_PRICES = {
     FishingRodRegular  = 100,
 }
 local selectedRodToBuy = "FishingRodPro"
+local ROD_BUDGETS = {
+    FishingRodRegular  = 1100,
+    FishingRodPro      = 2050,
+    FishingRodAdvanced = 3800,
+    FishingRodUltimate = 6500,
+}
+local ROD_DISPLAY_NAMES = {
+    FishingRodRegular  = "Fishing Rod Regular",
+    FishingRodPro      = "Fishing Rod Pro",
+    FishingRodAdvanced = "Fishing Rod Advanced",
+    FishingRodUltimate = "Fishing Rod Ultimate",
+}
+local autoFishToggle = nil
+
+local function getCurrentCash()
+    local val = LocalPlayer:GetAttribute("Cash")
+    if typeof(val) == "number" then return val end
+    local ls = LocalPlayer:FindFirstChild("leaderstats")
+    if ls then
+        local c = ls:FindFirstChild("Cash") or ls:FindFirstChild("Dinero") or ls:FindFirstChild("Money")
+        if c and typeof(c.Value) == "number" then return c.Value end
+    end
+    return 0
+end
+
+local function f2_hasSelectedRod(targetRodName)
+    local target = targetRodName or selectedRodToBuy or "FishingRodPro"
+    for _, t in ipairs(LocalPlayer.Backpack:GetChildren()) do
+        if t.Name == target then return t end
+    end
+    if char then
+        for _, t in ipairs(char:GetChildren()) do
+            if t:IsA("Tool") and t.Name == target then return t end
+        end
+    end
+    return nil
+end
+
+local function purgeFishingInventory()
+    local target = selectedRodToBuy or "FishingRodPro"
+    local hasTarget = f2_hasSelectedRod(target)
+    if hasTarget then return end
+
+    local itemsToDrop = {}
+    local function checkContainer(cont)
+        if not cont then return end
+        for _, ch in ipairs(cont:GetChildren()) do
+            if ch:IsA("Tool") and (ROD_TIERS[ch.Name] or BAIT_NAMES[ch.Name]) then
+                table.insert(itemsToDrop, ch)
+            end
+        end
+    end
+    checkContainer(LocalPlayer.Backpack)
+    if char then checkContainer(char) end
+
+    if #itemsToDrop > 0 then
+        if hrp and hrp.Parent then
+            hrp.CFrame = hrp.CFrame + Vector3.new(0, 5, 0)
+            hrp.AssemblyLinearVelocity = Vector3.zero
+            hrp.AssemblyAngularVelocity = Vector3.zero
+            hrp.Anchored = true
+        end
+        task.wait(0.3)
+
+        local houseR = ReplicatedStorage:FindFirstChild("MD_HouseRentalRemote")
+        local itemsEv = ReplicatedStorage:FindFirstChild("MD_ItemsEvent")
+
+        for _, tool in ipairs(itemsToDrop) do
+            if tool and tool.Parent then
+                pcall(function() hum:UnequipTools() end)
+                task.wait(0.1)
+                if houseR then
+                    pcall(function() houseR:FireServer("DropFarm", tool) end)
+                end
+                if itemsEv then
+                    pcall(function() itemsEv:FireServer("Drop", tool) end)
+                    pcall(function() itemsEv:FireServer("Drop", tool.Name) end)
+                    pcall(function() itemsEv:FireServer("DropStack", { id = tool.Name, amount = 9999, all = true }) end)
+                end
+                task.wait(0.15)
+            end
+        end
+
+        task.wait(0.3)
+        if hrp and hrp.Parent then
+            hrp.Anchored = false
+            hrp.AssemblyLinearVelocity = Vector3.zero
+            hrp.AssemblyAngularVelocity = Vector3.zero
+        end
+    end
+end
+
+local function canAffordSelectedRod()
+    local target = selectedRodToBuy or "FishingRodPro"
+    if f2_hasSelectedRod(target) then return true end
+
+    local cash = getCurrentCash()
+    local needed = ROD_BUDGETS[target] or 2050
+
+    if cash < needed then
+        local dispName = ROD_DISPLAY_NAMES[target] or "Fishing Rod Pro"
+        pcall(function()
+            WindUI:Notify({
+                Title = "Dinero Insuficiente",
+                Content = "Te faltan fondos para " .. dispName .. ". Ocupas $" .. needed .. " (Tienes $" .. cash .. ")",
+                Duration = 5,
+                Icon = "solar:danger-triangle-bold"
+            })
+        end)
+        return false
+    end
+    return true
+end
 
 local BAIT_NAMES = { WormtecUltimate = true, WormtecPro = true, WormtecRegular = true }
 
@@ -1068,9 +1181,7 @@ local function fish2Setup()
     if not houseR then return false end
 
     local rodToBuy = selectedRodToBuy or "FishingRodPro"
-    local hasSpecificRod = false
-    for _, t in ipairs(LocalPlayer.Backpack:GetChildren()) do if t.Name == rodToBuy then hasSpecificRod = true break end end
-    if not hasSpecificRod and char then for _, t in ipairs(char:GetChildren()) do if t:IsA("Tool") and t.Name == rodToBuy then hasSpecificRod = true break end end end
+    local hasSpecificRod = f2_hasSelectedRod(rodToBuy) ~= nil
 
     local rod, _  = f2_getBestRod()
     local bait, _ = f2_getBait()
@@ -1084,12 +1195,17 @@ local function fish2Setup()
         return true
     end
 
-    local cash = LocalPlayer:GetAttribute("Cash") or 0
-    local rodCost = ROD_PRICES[rodToBuy] or 800
-    local baitToBuy = ROD_BAIT[rodToBuy] or "WormtecRegular"
+    if not canAffordSelectedRod() then
+        fish2Active = false
+        task.defer(function()
+            if autoFishToggle then autoFishToggle:Set(false) end
+        end)
+        return false
+    end
 
-    if needRod and cash < rodCost then return false end
-    if needBait and cash < 200 then return false end
+    purgeFishingInventory()
+
+    local baitToBuy = ROD_BAIT[rodToBuy] or "WormtecRegular"
 
     if not fish2Move(COORD_FISH_SHOP) then
         return false
@@ -1103,18 +1219,16 @@ local function fish2Setup()
     if needRod then
         pcall(function() houseR:FireServer("BuyFishing", rodToBuy) end)
         local waited = 0
-        while not hasSpecificRod and waited < 6 do
+        while not f2_hasSelectedRod(rodToBuy) and waited < 6 do
             task.wait(0.4)
             waited += 0.4
-            for _, t in ipairs(LocalPlayer.Backpack:GetChildren()) do if t.Name == rodToBuy then hasSpecificRod = true break end end
-            if not hasSpecificRod and char then for _, t in ipairs(char:GetChildren()) do if t:IsA("Tool") and t.Name == rodToBuy then hasSpecificRod = true break end end end
         end
-        if not hasSpecificRod then
+        if not f2_hasSelectedRod(rodToBuy) then
             task.wait(1.0)
             pcall(function() houseR:FireServer("BuyFishing", rodToBuy) end)
             task.wait(1.5)
         end
-        rod = f2_getBestRod()
+        rod = f2_hasSelectedRod(rodToBuy) or f2_getBestRod()
         if rod then
             baitToBuy = ROD_BAIT[rod.Name] or "WormtecRegular"
         end
@@ -1805,7 +1919,7 @@ Tabs.Farm2:Dropdown({
         selectedRodToBuy = map[v] or "FishingRodPro"
     end
 })
-Tabs.Farm2:Toggle({
+autoFishToggle = Tabs.Farm2:Toggle({
     Title    = "Auto Pesca",
     Desc     = "Prepara equipo, viaja a la zona y pesca anclado",
     Icon     = "solar:fishing-bold",
@@ -1813,6 +1927,13 @@ Tabs.Farm2:Toggle({
     Callback = function(state)
         if state then
             if fish2Active then return end
+            if not canAffordSelectedRod() then
+                task.defer(function()
+                    if autoFishToggle then autoFishToggle:Set(false) end
+                end)
+                return
+            end
+            purgeFishingInventory()
             if hrp and hrp.Parent then
                 fishSavedOrigin = hrp.CFrame
             end
