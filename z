@@ -735,6 +735,14 @@ local ROD_BAIT = {
     FishingRodPro      = "WormtecPro",
     FishingRodRegular  = "WormtecRegular",
 }
+local ROD_PRICES = {
+    FishingRodUltimate = 5000,
+    FishingRodAdvanced = 2300,
+    FishingRodPro      = 800,
+    FishingRodRegular  = 100,
+}
+local selectedRodToBuy = "FishingRodPro"
+
 local BAIT_NAMES = { WormtecUltimate = true, WormtecPro = true, WormtecRegular = true }
 
 local fish2Active = false
@@ -977,6 +985,16 @@ end
 f2_setupHealthWatch()
 
 local function f2_getBestRod()
+    if selectedRodToBuy then
+        for _, t in ipairs(LocalPlayer.Backpack:GetChildren()) do
+            if t.Name == selectedRodToBuy then return t, ROD_TIERS[selectedRodToBuy] or 2 end
+        end
+        if char then
+            for _, t in ipairs(char:GetChildren()) do
+                if t:IsA("Tool") and t.Name == selectedRodToBuy then return t, ROD_TIERS[selectedRodToBuy] or 2 end
+            end
+        end
+    end
     local best, bestTier = nil, 0
     local function check(tool)
         local tier = ROD_TIERS[tool.Name]
@@ -1049,9 +1067,14 @@ local function fish2Setup()
     local houseR = ReplicatedStorage:FindFirstChild("MD_HouseRentalRemote")
     if not houseR then return false end
 
+    local rodToBuy = selectedRodToBuy or "FishingRodPro"
+    local hasSpecificRod = false
+    for _, t in ipairs(LocalPlayer.Backpack:GetChildren()) do if t.Name == rodToBuy then hasSpecificRod = true break end end
+    if not hasSpecificRod and char then for _, t in ipairs(char:GetChildren()) do if t:IsA("Tool") and t.Name == rodToBuy then hasSpecificRod = true break end end end
+
     local rod, _  = f2_getBestRod()
     local bait, _ = f2_getBait()
-    local needRod  = (rod == nil)
+    local needRod  = not hasSpecificRod
     local needBait = (bait == nil)
 
     if not needRod and not needBait then
@@ -1062,17 +1085,11 @@ local function fish2Setup()
     end
 
     local cash = LocalPlayer:GetAttribute("Cash") or 0
-    local rodToBuy = "FishingRodRegular"
-    local rodName = (rod and rod.Name) or rodToBuy
-    local baitToBuy = ROD_BAIT[rodName] or "WormtecRegular"
+    local rodCost = ROD_PRICES[rodToBuy] or 800
+    local baitToBuy = ROD_BAIT[rodToBuy] or "WormtecRegular"
 
-    if needRod and not needBait then
-        if cash < 2500 then return false end
-    elseif not needRod and needBait then
-        if cash < 200 then return false end
-    elseif needRod and needBait then
-        if cash < 2700 then return false end
-    end
+    if needRod and cash < rodCost then return false end
+    if needBait and cash < 200 then return false end
 
     if not fish2Move(COORD_FISH_SHOP) then
         return false
@@ -1086,20 +1103,20 @@ local function fish2Setup()
     if needRod then
         pcall(function() houseR:FireServer("BuyFishing", rodToBuy) end)
         local waited = 0
-        while f2_getBestRod() == nil and waited < 6 do
+        while not hasSpecificRod and waited < 6 do
             task.wait(0.4)
             waited += 0.4
+            for _, t in ipairs(LocalPlayer.Backpack:GetChildren()) do if t.Name == rodToBuy then hasSpecificRod = true break end end
+            if not hasSpecificRod and char then for _, t in ipairs(char:GetChildren()) do if t:IsA("Tool") and t.Name == rodToBuy then hasSpecificRod = true break end end end
         end
-        rod = f2_getBestRod()
-        if not rod then
+        if not hasSpecificRod then
             task.wait(1.0)
             pcall(function() houseR:FireServer("BuyFishing", rodToBuy) end)
             task.wait(1.5)
-            rod = f2_getBestRod()
         end
+        rod = f2_getBestRod()
         if rod then
-            rodName = rod.Name
-            baitToBuy = ROD_BAIT[rodName] or "WormtecRegular"
+            baitToBuy = ROD_BAIT[rod.Name] or "WormtecRegular"
         end
     end
 
@@ -1772,6 +1789,22 @@ Tabs.Farm2:Dropdown({
         F2_SPEED = F2_SPEED_LEVELS[v] or 20
     end
 })
+Tabs.Farm2:Dropdown({
+    Title    = "Cana de Pescar",
+    Desc     = "Cana que comprara y usara para pescar",
+    Icon     = "solar:shop-bold",
+    Values   = { "Fishing Rod Regular", "Fishing Rod Pro", "Fishing Rod Advanced", "Fishing Rod Ultimate" },
+    Value    = "Fishing Rod Pro",
+    Callback = function(v)
+        local map = {
+            ["Fishing Rod Regular"]  = "FishingRodRegular",
+            ["Fishing Rod Pro"]      = "FishingRodPro",
+            ["Fishing Rod Advanced"] = "FishingRodAdvanced",
+            ["Fishing Rod Ultimate"] = "FishingRodUltimate",
+        }
+        selectedRodToBuy = map[v] or "FishingRodPro"
+    end
+})
 Tabs.Farm2:Toggle({
     Title    = "Auto Pesca",
     Desc     = "Prepara equipo, viaja a la zona y pesca anclado",
@@ -1924,7 +1957,6 @@ oldNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
         if method == "FireServer" then
             local remoteName = self.Name
 
-            -- Glock
             if remoteName == "GlockEvent" and args[1] == "Shoot" and type(args[2]) == "table" then
                 local data   = args[2]
                 local origin = data.origin or Camera.CFrame.Position
