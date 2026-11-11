@@ -1,205 +1,735 @@
--- =========================================================================
--- CALLES DE BQM - RAINBOW 2D ESP EXCLUSIVO PARA VEHÍCULOS
--- Inspección del mapa: Los autos residen en Workspace.Vehiclesfix y
--- contienen la instancia 'DriverSeat' (SRT, Humvee, Civic, Mazede, C8, etc.)
--- Motor: 2D Bounding Box Projection + Rainbow Cycle Dinámico (HSV)
--- Target: Xeno Executor / Luau
--- =========================================================================
-
-local RunService = game:GetService("RunService")
 local Players = game:GetService("Players")
-local Workspace = game:GetService("Workspace")
-
-local Camera = Workspace.CurrentCamera
+local TextService = game:GetService("TextService")
+local CoreGui = game:GetService("CoreGui")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
+local Camera = workspace.CurrentCamera
+local Stats = game:GetService("Stats")
 
--- Parámetros del ESP Rainbow
-local SETTINGS = {
-    Thickness = 2,
-    RainbowSpeed = 0.6,        -- Velocidad de rotación cromática
-    MaxDistance = 2500,        -- Rango en studs
-    ShowText = true,           -- Mostrar nombre del modelo y distancia
-    TextSize = 13,
-}
+local V2_Active = true
+local SoundService = game:GetService("SoundService")
 
--- Tabla de seguimiento
-local TrackedVehicles = {}
+local fileActivated = "OpcionActivada1.mp3"
+local fileDeactivated = "OpcionDesactivada1.mp3"
 
--- Comprobación exacta según la jerarquía del .rbxlx de Calles de BQM
-local function IsBQMVehicle(model)
-    if not model or not model:IsA("Model") then return false end
+local urlActivated = "https://raw.githubusercontent.com/z22026we-beep/zeus/main/lv_0_20260816050935_mixed.mp3"
+local urlDeactivated = "https://raw.githubusercontent.com/z22026we-beep/zeus/main/lv_0_20260816044033_original_mixed.mp3"
 
-    -- 1. Pertenece a la carpeta Vehiclesfix
-    local vehiclesFolder = Workspace:FindFirstChild("Vehiclesfix")
-    if vehiclesFolder and model.Parent == vehiclesFolder then
-        return true
+task.spawn(function()
+    if not isfile(fileActivated) then
+        pcall(function() writefile(fileActivated, game:HttpGet(urlActivated)) end)
     end
-
-    -- 2. Posee DriverSeat (estándar en todos los autos de BQM)
-    if model:FindFirstChild("DriverSeat") and model.DriverSeat:IsA("VehicleSeat") then
-        return true
+    if not isfile(fileDeactivated) then
+        pcall(function() writefile(fileDeactivated, game:HttpGet(urlDeactivated)) end)
     end
+end)
 
-    -- 3. Fallback genérico por VehicleSeat en el modelo
-    if model:FindFirstChildWhichIsA("VehicleSeat", true) then
-        return true
-    end
+_G.PlayOptionActivated = function()
+    task.spawn(function()
+        if not isfile(fileActivated) then
+            pcall(function() writefile(fileActivated, game:HttpGet(urlActivated)) end)
+        end
 
-    return false
+        if isfile(fileActivated) then
+            local sound = Instance.new("Sound")
+            sound.Name = "VoiceActivated"
+            sound.SoundId = getcustomasset(fileActivated)
+            sound.Volume = 2
+            sound.Parent = SoundService
+            sound:Play()
+
+            sound.Ended:Connect(function()
+                sound:Destroy()
+            end)
+        end
+    end)
 end
 
--- Generador de objetos Drawing
-local function CreateVehicleDrawings()
-    local box = Drawing.new("Square")
-    box.Thickness = SETTINGS.Thickness
-    box.Filled = false
-    box.Transparency = 1
-    box.Visible = false
+_G.PlayOptionDeactivated = function()
+    task.spawn(function()
+        if not isfile(fileDeactivated) then
+            pcall(function() writefile(fileDeactivated, game:HttpGet(urlDeactivated)) end)
+        end
 
-    local label = Drawing.new("Text")
-    label.Size = SETTINGS.TextSize
-    label.Center = true
-    label.Outline = true
-    label.OutlineColor = Color3.fromRGB(0, 0, 0)
-    label.Visible = false
+        if isfile(fileDeactivated) then
+            local sound = Instance.new("Sound")
+            sound.Name = "VoiceDeactivated"
+            sound.SoundId = getcustomasset(fileDeactivated)
+            sound.Volume = 2
+            sound.Parent = SoundService
+            sound:Play()
 
-    return {Box = box, Label = label}
+            sound.Ended:Connect(function()
+                sound:Destroy()
+            end)
+        end
+    end)
 end
 
--- Registrar auto
-local function RegisterVehicle(model)
-    if TrackedVehicles[model] then return end
-
-    local drawings = CreateVehicleDrawings()
-    TrackedVehicles[model] = {
-        Model = model,
-        Drawings = drawings,
-    }
-end
-
--- Desmontar auto destruido
-local function UnregisterVehicle(model)
-    local entry = TrackedVehicles[model]
-    if entry then
-        pcall(function()
-            entry.Drawings.Box:Remove()
-            entry.Drawings.Label:Remove()
-        end)
-        TrackedVehicles[model] = nil
-    end
-end
-
--- Indexar carpeta Vehiclesfix y Workspace
-local function ScanInitialVehicles()
-    local vehFolder = Workspace:FindFirstChild("Vehiclesfix")
-    if vehFolder then
-        for _, child in ipairs(vehFolder:GetChildren()) do
-            if IsBQMVehicle(child) then
-                RegisterVehicle(child)
+local function IsRealPlayer(player)
+    if not player or not player:IsA("Player") or player == LocalPlayer or player.UserId <= 0 then return false end
+    
+    local char = player.Character
+    if not char or not char.Parent then return false end
+    
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    local head = char:FindFirstChild("Head")
+    local root = char:FindFirstChild("HumanoidRootPart")
+    
+    if not hum or hum.Health <= 0 or not head or not root then return false end
+    
+    for _, part in pairs(char:GetDescendants()) do
+        if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
+            if part.Transparency + part.LocalTransparencyModifier < 0.9 then
+                return true
             end
         end
     end
+    
+    return false
+end
 
-    for _, obj in ipairs(Workspace:GetChildren()) do
-        if IsBQMVehicle(obj) then
-            RegisterVehicle(obj)
+_G.IsRealPlayer = IsRealPlayer
+
+_G.GetRealPlayers = function()
+    local realPlayers = {}
+    for _, player in pairs(Players:GetPlayers()) do
+        if IsRealPlayer(player) then
+            table.insert(realPlayers, player)
         end
+    end
+    return realPlayers
+end
+
+if CoreGui:FindFirstChild("Z_ArrayList_System") then 
+    CoreGui.Z_ArrayList_System:Destroy() 
+end
+
+local arrayGui = Instance.new("ScreenGui")
+arrayGui.Name = "Z_ArrayList_System"
+arrayGui.ResetOnSpawn = false
+arrayGui.IgnoreGuiInset = true 
+
+local success = pcall(function() arrayGui.Parent = CoreGui end)
+if not success then
+    arrayGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+end
+
+_G.Z_ArrayList_Enabled = true
+_G.Z_ArrayList_ColorMode = "RGB"
+_G.Z_ArrayList_CustomColor = Color3.fromRGB(170, 0, 255)
+_G.Z_ArrayList_OffsetX = -10
+_G.Z_ArrayList_OffsetY = 35
+_G.Z_ArrayList_TextSize = 14
+_G.Z_ArrayList_Padding = 3
+
+local arrayContainer = Instance.new("Frame", arrayGui)
+arrayContainer.Name = "Container"
+arrayContainer.AnchorPoint = Vector2.new(1, 0)
+arrayContainer.Position = UDim2.new(1, _G.Z_ArrayList_OffsetX, 0, _G.Z_ArrayList_OffsetY)
+arrayContainer.Size = UDim2.new(0, 400, 1, 0)
+arrayContainer.BackgroundTransparency = 1
+
+local arrayListLayout = Instance.new("UIListLayout", arrayContainer)
+arrayListLayout.HorizontalAlignment = Enum.HorizontalAlignment.Right
+arrayListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+arrayListLayout.Padding = UDim.new(0, _G.Z_ArrayList_Padding)
+
+local ActiveModules = {}
+local ActiveRenderItems = {}
+
+local function GetTextWidth(text, font, size)
+    return TextService:GetTextSize(text, size, font, Vector2.new(1000, 1000)).X
+end
+
+local function GetActiveArrayListColor(index)
+    if _G.Z_ArrayList_ColorMode == "RGB" then
+        local hue = ((tick() * 0.35) + ((index or 1) * 0.06)) % 1
+        return Color3.fromHSV(hue, 0.8, 1)
+    elseif _G.Z_ArrayList_ColorMode == "Morado" then
+        return Color3.fromRGB(170, 0, 255)
+    elseif _G.Z_ArrayList_ColorMode == "Azul" then
+        return Color3.fromRGB(0, 150, 255)
+    elseif _G.Z_ArrayList_ColorMode == "Personalizado" then
+        return _G.Z_ArrayList_CustomColor
+    else
+        return Color3.fromRGB(0, 255, 128)
     end
 end
 
-ScanInitialVehicles()
+local function UpdateContainerLayout()
+    arrayContainer.Position = UDim2.new(1, _G.Z_ArrayList_OffsetX, 0, _G.Z_ArrayList_OffsetY)
+    arrayListLayout.Padding = UDim.new(0, _G.Z_ArrayList_Padding)
+end
 
--- Detectar autos nuevos que spawneen o entren al mapa
-Workspace.DescendantAdded:Connect(function(descendant)
-    if descendant:IsA("Model") and IsBQMVehicle(descendant) then
-        RegisterVehicle(descendant)
-    elseif descendant:IsA("VehicleSeat") and descendant.Parent and descendant.Parent:IsA("Model") then
-        RegisterVehicle(descendant.Parent)
+local function RenderArrayList()
+    ActiveRenderItems = {}
+    
+    for _, child in pairs(arrayContainer:GetChildren()) do
+        if child:IsA("Frame") then child:Destroy() end
+    end
+
+    if not _G.Z_ArrayList_Enabled then return end
+    UpdateContainerLayout()
+
+    local sortedList = {}
+    for name, data in pairs(ActiveModules) do
+        if data.State then
+            table.insert(sortedList, {
+                Name = name,
+                Suffix = data.Suffix or ""
+            })
+        end
+    end
+
+    local font = Enum.Font.GothamBold
+    local textSize = _G.Z_ArrayList_TextSize or 14
+
+    table.sort(sortedList, function(a, b)
+        local textA = a.Name .. (a.Suffix ~= "" and (" " .. a.Suffix) or "")
+        local textB = b.Name .. (b.Suffix ~= "" and (" " .. b.Suffix) or "")
+        return GetTextWidth(textA, font, textSize) > GetTextWidth(textB, font, textSize)
+    end)
+
+    for i, mod in ipairs(sortedList) do
+        local fullText = mod.Name .. (mod.Suffix ~= "" and (" " .. mod.Suffix) or "")
+        local textWidth = GetTextWidth(fullText, font, textSize)
+        local currentColor = GetActiveArrayListColor(i)
+        local itemHeight = textSize + 8
+
+        local itemFrame = Instance.new("Frame", arrayContainer)
+        itemFrame.Size = UDim2.new(0, textWidth + 18, 0, itemHeight)
+        itemFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
+        itemFrame.BackgroundTransparency = 0.25
+        itemFrame.BorderSizePixel = 0
+        itemFrame.LayoutOrder = i
+
+        local itemCorner = Instance.new("UICorner", itemFrame)
+        itemCorner.CornerRadius = UDim.new(0, 4)
+
+        local itemStroke = Instance.new("UIStroke", itemFrame)
+        itemStroke.Thickness = 1
+        itemStroke.Transparency = 0.55
+        itemStroke.Color = currentColor
+
+        local accent = Instance.new("Frame", itemFrame)
+        accent.Size = UDim2.new(0, 3, 1, -4)
+        accent.Position = UDim2.new(1, -4, 0, 2)
+        accent.BackgroundColor3 = currentColor
+        accent.BorderSizePixel = 0
+
+        local accentCorner = Instance.new("UICorner", accent)
+        accentCorner.CornerRadius = UDim.new(0, 2)
+
+        local label = Instance.new("TextLabel", itemFrame)
+        label.Size = UDim2.new(1, -12, 1, 0)
+        label.Position = UDim2.new(0, 4, 0, 0)
+        label.BackgroundTransparency = 1
+        label.Text = fullText
+        label.TextColor3 = currentColor
+        label.Font = font
+        label.TextSize = textSize
+        label.TextXAlignment = Enum.TextXAlignment.Right
+
+        table.insert(ActiveRenderItems, {
+            Index = i,
+            Label = label,
+            Accent = accent,
+            Stroke = itemStroke
+        })
+    end
+end
+
+RunService.Heartbeat:Connect(function()
+    if _G.Z_ArrayList_Enabled and _G.Z_ArrayList_ColorMode == "RGB" then
+        for _, item in ipairs(ActiveRenderItems) do
+            if item.Label and item.Label.Parent then
+                local col = GetActiveArrayListColor(item.Index)
+                item.Label.TextColor3 = col
+                item.Accent.BackgroundColor3 = col
+                item.Stroke.Color = col
+            end
+        end
     end
 end)
 
-Workspace.DescendantRemoving:Connect(function(descendant)
-    if TrackedVehicles[descendant] then
-        UnregisterVehicle(descendant)
-    end
-end)
+_G.UpdateArrayList = function(name, state, suffix)
+    ActiveModules[name] = {
+        State = state,
+        Suffix = suffix or ""
+    }
+    RenderArrayList()
+end
 
--- Bucle de renderizado 2D Rainbow por frame
-RunService.RenderStepped:Connect(function()
-    -- Cálculo del color Rainbow mediante HSV continuo
-    local rainbowColor = Color3.fromHSV((tick() * SETTINGS.RainbowSpeed) % 1, 1, 1)
+_G.RefreshArrayListUI = RenderArrayList
 
-    local myChar = LocalPlayer.Character
-    local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
-    local myPos = myRoot and myRoot.Position or Camera.CFrame.Position
+local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
+WindUI:SetTheme("Dark")
 
-    for model, data in pairs(TrackedVehicles) do
-        local box = data.Drawings.Box
-        local label = data.Drawings.Label
+local Window = WindUI:CreateWindow({
+    Title = "Ｚ  ＮＥＸＵＳ",
+    Icon = "rbxthumb://type=Asset&id=88212626965405&w=420&h=420",
+    Author = "<i><font color='#888888'>By</font> <font color='#00FF00'>@znoreste</font></i>",
+    Folder = "ZNexus",
+    Size = UDim2.fromOffset(600, 480),
+    MinSize = Vector2.new(560, 350),
+    MaxSize = Vector2.new(850, 560),
+    ToggleKey = Enum.KeyCode.P,
+    Transparent = true,
+    Theme = "Dark",
+    Resizable = true,
+    SideBarWidth = 200,
+    HideSearchBar = true,
+    ScrollBarEnabled = true,
 
-        if not model or not model.Parent then
-            UnregisterVehicle(model)
-        else
-            local cframe, size = model:GetBoundingBox()
-            local vehPos = cframe.Position
-            local distance = (vehPos - myPos).Magnitude
+    Topbar = {
+        Height = 44,
+        ButtonsType = "", 
+    },
 
-            if distance > SETTINGS.MaxDistance then
-                box.Visible = false
-                label.Visible = false
-            else
-                local screenPos, onScreen = Camera:WorldToViewportPoint(vehPos)
+    KeySystem = {
+        Key = { "wnexus", "" },
+        Note = "Ingresa tu Key para acceder. Si no la tienes unete al discord.",
+        URL = "https://discord.gg/xjbhK2hdT",
+        SaveKey = false,
+    },
 
-                if onScreen then
-                    -- Proyección 3D a 2D de los 8 vértices del chasis
-                    local extX = size.X / 2
-                    local extY = size.Y / 2
-                    local extZ = size.Z / 2
+    OpenButton = {
+        Title = "Z Nexus",
+        CornerRadius = UDim.new(4, 7),
+        StrokeThickness = 0.0,
+        Enabled = true,
+        Draggable = true,
+        OnlyMobile = false,
+        Color = ColorSequence.new(
+            Color3.fromHex("#484848"), 
+            Color3.fromHex("#ffffff")
+        )
+    },
 
-                    local corners = {
-                        cframe * CFrame.new(extX, extY, extZ),
-                        cframe * CFrame.new(-extX, extY, extZ),
-                        cframe * CFrame.new(extX, -extY, extZ),
-                        cframe * CFrame.new(-extX, -extY, extZ),
-                        cframe * CFrame.new(extX, extY, -extZ),
-                        cframe * CFrame.new(-extX, extY, -extZ),
-                        cframe * CFrame.new(extX, -extY, -extZ),
-                        cframe * CFrame.new(-extX, -extY, -extZ),
-                    }
+    Background = "https://raw.githubusercontent.com/z22026we-beep/zeus/main/VeniceAI_AOYcKtt.png",
+    BackgroundImageTransparency = 0.35,
 
-                    local minX, minY = math.huge, math.huge
-                    local maxX, maxY = -math.huge, -math.huge
+    User = {
+        Enabled = true,
+        Anonymous = false,
+        Title = "Z",
+        Subtitle = "Owner & Developer",
+        Icon = "rbxthumb://type=AvatarHeadShot&id=5569179741&w=150&h=150",
+        Callback = function() print("") end,
+    },
+})
 
-                    for i = 1, 8 do
-                        local p = Camera:WorldToViewportPoint(corners[i].Position)
-                        if p.X < minX then minX = p.X end
-                        if p.X > maxX then maxX = p.X end
-                        if p.Y < minY then minY = p.Y end
-                        if p.Y > maxY then maxY = p.Y end
+local InfoTab = Window:Tab({ Title = "Home", Icon = "info" })
+local CombatTab = Window:Tab({ Title = "Combat", Icon = "home" })
+local VisualsTab = Window:Tab({ Title = "Render", Icon = "home" })
+local SilentTab = Window:Tab({ Title = "Silent Aim", Icon = "home" })
+local MainTab = Window:Tab({ Title = "", Icon = "info" })
+local OtherTab = Window:Tab({ Title = "Other", Icon = "home" })
+local UniversalTab = Window:Tab({ Title = "Universal", Icon = "home" })
+local ConfigTab = Window:Tab({ Title = "Config Save", Icon = "home" })
+
+-- =========================================================================
+-- CALLES DE BQM - SILENT AIM CORREGIDO (MOTOR BALÍSTICO MD_Fresh)
+-- Causa del fallo original descubierta en el .rbxlx:
+-- Las armas en BQM NO usan workspace:Raycast para registrar el daño en el servidor.
+-- Generan un rayo con Camera:ViewportPointToRay / ScreenPointToRay y envían una tabla:
+-- { origin = Vector3, direction = Vector3, cameraOffset = Vector3, shotAt = ..., shotId = ... }
+-- a través de 'GlockEvent:FireServer("Shoot", data)' o 'MD_ItemsEvent:FireServer("FireGun", data)'.
+-- Hookear workspace:Raycast solo cambiaba la línea visual de humo; el servidor
+-- seguía recibiendo la dirección original hacia donde apuntaba la mira.
+-- =========================================================================
+
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local Camera = workspace.CurrentCamera
+local LocalPlayer = Players.LocalPlayer
+
+_G.Silent_Enabled = false
+_G.Silent_Range = 300
+_G.Silent_FOV = 150
+_G.Silent_ShowFOV = false
+_G.Silent_TeamCheck = false
+_G.Silent_Mode = "Normal"
+
+local CurrentTargetSilent = nil
+local WeaponEquipped = false
+
+-- Círculo FOV
+local FOVCircleSilent = Drawing.new("Circle")
+FOVCircleSilent.Thickness = 1.5
+FOVCircleSilent.Color = Color3.fromRGB(0, 255, 200)
+FOVCircleSilent.Transparency = 0.8
+FOVCircleSilent.Filled = false
+FOVCircleSilent.Visible = false
+
+-- Línea Tracer al blanco
+local TracerSilent = Drawing.new("Line")
+TracerSilent.Thickness = 1.5
+TracerSilent.Color = Color3.fromRGB(255, 50, 50)
+TracerSilent.Visible = false
+
+-- Función para buscar el objetivo más cercano a la mira
+local function getClosestTargetSilent()
+    local centerPos = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+    local char = LocalPlayer.Character
+    if not char or not char:FindFirstChild("HumanoidRootPart") then return nil end
+    local localPos = char.HumanoidRootPart.Position
+
+    local closest = nil
+    local minDist = math.huge
+
+    local targetList = _G.GetRealPlayers and _G.GetRealPlayers() or Players:GetPlayers()
+
+    for _, pl in ipairs(targetList) do
+        if pl ~= LocalPlayer and pl.Character then
+            local head = pl.Character:FindFirstChild("Head")
+            local hum = pl.Character:FindFirstChildOfClass("Humanoid")
+
+            if head and hum and hum.Health > 0 then
+                local isTeam = _G.Silent_TeamCheck and LocalPlayer.Team and pl.Team and (pl.Team == LocalPlayer.Team)
+                if not isTeam then
+                    local dist = (localPos - head.Position).Magnitude
+                    if dist <= _G.Silent_Range then
+                        local sp, onScreen = Camera:WorldToViewportPoint(head.Position)
+                        if onScreen then
+                            local screenDist = (Vector2.new(sp.X, sp.Y) - centerPos).Magnitude
+                            if screenDist <= _G.Silent_FOV and screenDist < minDist then
+                                minDist = screenDist
+                                closest = head
+                            end
+                        end
                     end
-
-                    -- Posicionar caja 2D Rainbow
-                    box.Size = Vector2.new(maxX - minX, maxY - minY)
-                    box.Position = Vector2.new(minX, minY)
-                    box.Color = rainbowColor
-                    box.Visible = true
-
-                    -- Texto opcional
-                    if SETTINGS.ShowText then
-                        label.Text = string.format("%s [%dm]", model.Name, math.floor(distance))
-                        label.Position = Vector2.new(minX + ((maxX - minX) / 2), minY - (SETTINGS.TextSize + 4))
-                        label.Color = rainbowColor
-                        label.Visible = true
-                    else
-                        label.Visible = false
-                    end
-                else
-                    box.Visible = false
-                    label.Visible = false
                 end
             end
         end
     end
+    return closest
+end
+
+-- Comprobar si tenemos arma en mano
+local function checkWeapon()
+    local char = LocalPlayer.Character
+    if not char then 
+        WeaponEquipped = false
+        return 
+    end
+    local tool = char:FindFirstChildWhichIsA("Tool")
+    WeaponEquipped = (tool ~= nil)
+end
+
+-- =========================================================================
+-- HOOK MAESTRO: INTERCEPTA LA BALÍSTICA DE BQM (GlockEvent y MD_ItemsEvent)
+-- Y REDIRIGE Camera:ViewportPointToRay / ScreenPointToRay
+-- =========================================================================
+local oldNamecall
+oldNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+    local method = getnamecallmethod()
+    local args = {...}
+
+    if _G.Silent_Enabled and not checkcaller() and CurrentTargetSilent then
+        -- [1] REDIRECCIÓN EN EL REMOTE DEL SERVIDOR (Daño Real)
+        if method == "FireServer" then
+            local remoteName = self.Name
+            
+            -- Glock (GlockEvent -> "Shoot", predictionTable)
+            if remoteName == "GlockEvent" and args[1] == "Shoot" and type(args[2]) == "table" then
+                local data = args[2]
+                local origin = data.origin or Camera.CFrame.Position
+                data.direction = (CurrentTargetSilent.Position - origin).Unit
+                return oldNamecall(self, "Shoot", data)
+            end
+
+            -- Resto de armas: AK47, AWP, M16, P90, etc. (MD_ItemsEvent -> "FireGun", predictionTable)
+            if remoteName == "MD_ItemsEvent" and args[1] == "FireGun" and type(args[2]) == "table" then
+                local data = args[2]
+                local origin = data.origin or Camera.CFrame.Position
+                data.direction = (CurrentTargetSilent.Position - origin).Unit
+                return oldNamecall(self, "FireGun", data)
+            end
+        end
+
+        -- [2] REDIRECCIÓN DE RAYOS DE CÁMARA (Para MD_TracerVisual y visuales)
+        if self == Camera and (method == "ViewportPointToRay" or method == "ScreenPointToRay") then
+            local origin = Camera.CFrame.Position
+            local dir = (CurrentTargetSilent.Position - origin).Unit
+            return Ray.new(origin, dir)
+        end
+
+        -- [3] REDIRECCIÓN POR RAYCAST TRADICIONAL (Fallback)
+        if self == workspace and method == "Raycast" then
+            local origin = args[1]
+            if typeof(origin) == "Vector3" then
+                args[2] = (CurrentTargetSilent.Position - origin).Unit * 500
+                return oldNamecall(self, unpack(args))
+            end
+        end
+    end
+
+    return oldNamecall(self, ...)
+end))
+
+-- Bucle de render y actualización de objetivo
+RunService.RenderStepped:Connect(function()
+    checkWeapon()
+    local center = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+
+    if _G.Silent_Enabled and WeaponEquipped then
+        CurrentTargetSilent = getClosestTargetSilent()
+    else
+        CurrentTargetSilent = nil
+    end
+
+    -- Actualizar Círculo FOV
+    FOVCircleSilent.Position = center
+    FOVCircleSilent.Radius = _G.Silent_FOV
+    FOVCircleSilent.Visible = _G.Silent_Enabled and _G.Silent_ShowFOV
+
+    -- Actualizar Línea al Blanco
+    if CurrentTargetSilent and _G.Silent_Enabled then
+        local sp, onScreen = Camera:WorldToViewportPoint(CurrentTargetSilent.Position)
+        if onScreen then
+            TracerSilent.From = center
+            TracerSilent.To = Vector2.new(sp.X, sp.Y)
+            TracerSilent.Visible = true
+        else
+            TracerSilent.Visible = false
+        end
+    else
+        TracerSilent.Visible = false
+    end
 end)
 
-print("[BQM] Rainbow 2D Vehicle ESP montado en Xeno.")
+-- -------------------------------------------------------------------------
+-- INTEGRACIÓN A TU UI (SilentTab)
+-- -------------------------------------------------------------------------
+SilentTab:Section({ Title = "Silent Aim Config" })
+
+SilentTab:Toggle({
+    Title = "Silent Aim",
+    Desc = "Redirige los paquetes balísticos de BQM directamente a la cabeza.",
+    Flag = "Silent_Enabled",
+    Value = false,
+    Callback = function(state)
+        _G.Silent_Enabled = state
+        if not state then 
+            CurrentTargetSilent = nil
+            TracerSilent.Visible = false
+            FOVCircleSilent.Visible = false
+        end
+        if _G.UpdateArrayList then
+            _G.UpdateArrayList("SilentAim", state, "[" .. _G.Silent_Mode .. "]")
+        end
+    end
+})
+
+SilentTab:Dropdown({
+    Title = "Modo Silent Aim",
+    Desc = "Selecciona el modo de funcionamiento.",
+    Flag = "MoDo",
+    Values = { "Normal", "Insta" },
+    Default = "Normal",
+    Callback = function(option)
+        _G.Silent_Mode = option
+    end
+})
+
+SilentTab:Toggle({
+    Title = "Mostrar FOV",
+    Desc = "Muestra u oculta el círculo de rango central.",
+    Flag = "Silent_ShowFOV",
+    Value = false,
+    Callback = function(state)
+        _G.Silent_ShowFOV = state
+    end
+})
+
+SilentTab:Toggle({
+    Title = "Team Check",
+    Desc = "Ignora a los jugadores de tu mismo equipo.",
+    Flag = "Silent_TeamCheck",
+    Value = false,
+    Callback = function(state)
+        _G.Silent_TeamCheck = state
+        CurrentTargetSilent = nil
+    end
+})
+
+SilentTab:Slider({
+    Title = "Rango de Distancia",
+    Desc = "Distancia máxima en studs para detectar objetivos.",
+    Flag = "Silent_Range",
+    Step = 10,
+    Value = { Min = 10, Max = 1500, Default = 300 },
+    Callback = function(v)
+        _G.Silent_Range = v
+    end
+})
+
+SilentTab:Slider({
+    Title = "Radio FOV",
+    Desc = "Tamaño del área de detección central.",
+    Flag = "Silent_FOV",
+    Step = 10,
+    Value = { Min = 20, Max = 500, Default = 150 },
+    Callback = function(v)
+        _G.Silent_FOV = v
+    end
+})
+
+print("[BQM] Silent Aim balístico montado.")
+
+ConfigTab:Section({ Title = "Gestor de Configuraciones (Max. 5)" })
+
+local ConfigLimit = 5
+local SaveConfigName = ""
+local SelectedConfig = nil
+local ConfigDropdown
+
+local function GetConfigFolderPath()
+    local path1 = "WindUI/" .. Window.Folder .. "/config"
+    local path2 = "WindUI/" .. Window.Folder .. "/configs"
+    if isfolder and isfolder(path1) then return path1 end
+    if isfolder and isfolder(path2) then return path2 end
+    return path1
+end
+
+local function GetSavedConfigs()
+    local list = {}
+    local path = GetConfigFolderPath()
+    if listfiles and isfolder and isfolder(path) then
+        local files = listfiles(path)
+        for _, filePath in ipairs(files) do
+            local fileName = filePath:match("([^/\\]+)%.json$")
+            if fileName and fileName ~= "" then
+                table.insert(list, fileName)
+            end
+        end
+    end
+    return list
+end
+
+local StatusParagraph = ConfigTab:Paragraph({
+    Title = "Estado de Configuraciones",
+    Desc = "Cargando..."
+})
+
+local function RefreshConfigList()
+    local saved = GetSavedConfigs()
+    StatusParagraph:SetDesc("Configuraciones guardadas: " .. tostring(#saved) .. " / " .. tostring(ConfigLimit))
+    if ConfigDropdown then
+        if ConfigDropdown.SetValues then
+            ConfigDropdown:SetValues(saved)
+        elseif ConfigDropdown.Refresh then
+            ConfigDropdown:Refresh(saved)
+        end
+    end
+end
+
+ConfigDropdown = ConfigTab:Dropdown({
+    Title = "Seleccionar Configuracion",
+    Desc = "Elige una configuracion guardada para cargar o eliminar",
+    Values = GetSavedConfigs(),
+    Value = "",
+    Callback = function(selected)
+        SelectedConfig = selected
+    end
+})
+
+ConfigTab:Button({
+    Title = "Cargar Configuracion Seleccionada",
+    Desc = "Aplica los ajustes de la config elegida en la lista",
+    Callback = function()
+        if not SelectedConfig or SelectedConfig == "" then
+            WindUI:Notify({ Title = "Error", Content = "Selecciona una config de la lista desplegable.", Icon = "x", Duration = 3 })
+            return
+        end
+
+        local MyConfig = Window.ConfigManager:Config(SelectedConfig)
+        MyConfig:Load()
+
+        WindUI:Notify({ Title = "Cargado", Content = "Config cargada: " .. SelectedConfig, Icon = "check", Duration = 3 })
+    end
+})
+
+ConfigTab:Section({ Title = "Save Settings" })
+
+ConfigTab:Input({
+    Title = "Nombre de la Configuracion",
+    Desc = "Escribe un nombre para crear o sobrescribir",
+    Value = "",
+    PlaceholderText = "Ejemplo: legit_pvp",
+    Callback = function(text)
+        SaveConfigName = text
+    end
+})
+
+ConfigTab:Button({
+    Title = "Crear / Guardar Configuracion",
+    Desc = "Guarda los ajustes actuales con el nombre escrito arriba",
+    Callback = function()
+        if not SaveConfigName or SaveConfigName == "" then
+            WindUI:Notify({ Title = "Error", Content = "Escribe un nombre en la casilla superior.", Icon = "x", Duration = 3 })
+            return
+        end
+
+        local saved = GetSavedConfigs()
+        local alreadyExists = false
+        for _, name in ipairs(saved) do
+            if name == SaveConfigName then
+                alreadyExists = true
+                break
+            end
+        end
+
+        if not alreadyExists and #saved >= ConfigLimit then
+            WindUI:Notify({ Title = "Limite Alcanzado", Content = "Ya tienes 5 configs guardadas.", Icon = "alert-triangle", Duration = 4 })
+            return
+        end
+
+        local MyConfig = Window.ConfigManager:Config(SaveConfigName)
+        MyConfig:Save()
+
+        task.wait(0.3)
+        RefreshConfigList()
+
+        WindUI:Notify({ Title = "Guardado", Content = "Config guardada: " .. SaveConfigName, Icon = "check", Duration = 3 })
+    end
+})
+
+ConfigTab:Button({
+    Title = "Eliminar Configuracion Seleccionada",
+    Desc = "Borra el archivo .json de la config elegida",
+    Callback = function()
+        if not SelectedConfig or SelectedConfig == "" then
+            WindUI:Notify({ Title = "Error", Content = "Selecciona una config para eliminar.", Icon = "x", Duration = 3 })
+            return
+        end
+
+        local folderPath = GetConfigFolderPath()
+        local filePath = folderPath .. "/" .. SelectedConfig .. ".json"
+
+        if isfile and isfile(filePath) and delfile then
+            delfile(filePath)
+            WindUI:Notify({ Title = "Eliminado", Content = "Se elimino: " .. SelectedConfig, Icon = "trash", Duration = 3 })
+        else
+            WindUI:Notify({ Title = "Aviso", Content = "No se encontro la config en carpeta.", Icon = "alert-triangle", Duration = 3 })
+        end
+
+        SelectedConfig = nil
+        task.wait(0.3)
+        RefreshConfigList()
+    end
+})
+
+RefreshConfigList()
+InfoTab:Select()
+
+WindUI:Notify({
+    Title = "Z Nexus",
+    Content = "...",
+    Icon = "check",
+    Duration = 1,
+})
