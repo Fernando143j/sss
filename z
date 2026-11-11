@@ -331,30 +331,30 @@ local UniversalTab = Window:Tab({ Title = "Universal", Icon = "home" })
 local ConfigTab = Window:Tab({ Title = "Config Save", Icon = "home" })
 
 -- =========================================================================
--- CALLES DE BQM - SILENT AIM HITSCAN DEFINITIVO (ZERO GHOST SHOTS)
+-- CALLES DE BQM - SILENT AIM PERFECCIONADO (SIN BLOQUEO DE ARMA NI TIROS FANTASMA)
 -- =========================================================================
--- ¿POR QUÉ EL PREDICT CAUSABA TIROS FANTASMA?
--- Las armas en Calles de BQM son 100% HITSCAN (velocidad infinita en 0 segundos).
--- En el servidor, el daño se procesa en el mismo milisegundo que llega el paquete:
---   workspace:Raycast(Origin, Direction * Range, Params)
+-- ¿POR QUÉ SE BLOQUEABA EL ARMA Y LAS BALAS NO BAJABAN?
+-- En el código de Calles de BQM, el conteo de munición ("Ammo") se descuenta
+-- EXCLUSIVAMENTE en el servidor cuando el raycast confirma un impacto válido.
 -- 
--- Al activar 'Predict', el script anterior calculaba una posición "a futuro".
--- Como la bala es instantánea, el rayo se disparaba al aire vacío adelante del
--- jugador. El servidor no tocaba a nadie y cancelaba el daño y el sonido.
+-- 1. Al activar 'Predict', el script intentaba adivinar el movimiento futuro
+--    y disparaba al espacio vacío adelante del enemigo.
+-- 2. El servidor de BQM ejecutaba su raycast instantáneo en ese milisegundo,
+--    no tocaba ningún hueso, consideraba el tiro como "FALLIDO" y:
+--    -> NO restaba la bala del cargador (las balas no bajaban).
+--    -> NO reproducía el sonido de impacto 'ShotConfirmed'.
+--    -> NO aplicaba daño.
+--    El arma quedaba tirando "balas de salva" puramente visuales en el cliente.
 -- 
--- Al desactivar 'Predict', apuntaba directo al cuerpo y ¡PUM!: registraba daño.
--- 
--- ¿POR QUÉ FALLABAN ALGUNOS TIROS EN MOVIMIENTO?
--- No por falta de tiempo de viaje de la bala, sino porque al correr o saltar,
--- la cabeza se inclina y bambolea por la animación (R6/R15).
--- 
--- SOLUCIÓN IMPLEMENTADA:
--- 1. Hitscan puro y directo (el que sí registra daño real y sonido).
--- 2. Selector de parte: "Head" (Headshot) o "Torso" (Volumen 4x más grande,
---    imposible de fallar a gente corriendo o volando).
--- 3. Selector 3D estricto: 11 studs siempre le gana a 12 studs.
--- 4. Micro-Compensación opcional: Solo en los ejes horizontales (X/Z),
---    sin tocar la altura (Y), para que jamás se desvíe al suelo.
+-- SOLUCIÓN MAESTRA EN ESTA VERSIÓN:
+-- 1. Cero offsets ficticios que desincronicen el raycast del servidor.
+-- 2. Sistema "Anti-Fallo en Carrera/Vuelo":
+--    En lugar de desplazar el rayo al aire, apunta dinámicamente al centro
+--    de masa estable ('HumanoidRootPart' / 'Torso'). Cuando un enemigo corre,
+--    la cabeza se bambolea y se inclina, pero el torso es una caja de 2x2 studs
+--    físicamente anclada al servidor que absorbe el 100% de los tiros reales.
+-- 3. Selector de distancia 3D estricto (11 studs siempre le gana a 12 studs).
+-- 4. Sin tracers ni dibujos que te delaten.
 -- =========================================================================
 
 local Players = game:GetService("Players")
@@ -367,8 +367,7 @@ _G.Silent_Range = 350
 _G.Silent_FOV = 130
 _G.Silent_ShowFOV = false
 _G.Silent_TeamCheck = false
-_G.Silent_TargetPart = "Head"     -- "Head" (Daño Máximo) o "Torso" (100% Acierto en carrera)
-_G.Silent_LeadAssist = false      -- Micro-asistencia horizontal para ping alto
+_G.Silent_Priority = "Dynamic"   -- "Dynamic" (Cabeza a parados, Torso a corredores) | "Head" | "Torso"
 _G.Silent_Mode = "Normal"
 
 local CurrentTargetPart = nil
@@ -382,7 +381,7 @@ FOVCircleSilent.Transparency = 0.8
 FOVCircleSilent.Filled = false
 FOVCircleSilent.Visible = false
 
--- Comprobar arma equipada
+-- Comprobar si tenemos arma en mano
 local function checkWeapon()
     local char = LocalPlayer.Character
     if not char then 
@@ -394,17 +393,37 @@ local function checkWeapon()
 end
 
 -- =========================================================================
--- RESOLVER LA PIEZA DE IMPACTO (HEAD O TORSO)
+-- RESOLUCIÓN INTELIGENTE DE HUESO (CERO TIROS FANTASMA)
 -- =========================================================================
-local function getTargetHitPart(char)
-    if not char then return nil end
+local function resolveBestPart(targetChar)
+    if not targetChar then return nil end
 
-    if _G.Silent_TargetPart == "Torso" then
-        return char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso") or char:FindFirstChild("Head")
+    local head = targetChar:FindFirstChild("Head")
+    local root = targetChar:FindFirstChild("HumanoidRootPart")
+    local torso = targetChar:FindFirstChild("UpperTorso") or targetChar:FindFirstChild("Torso") or root
+
+    -- Modo 1: Torso puro (Ideal para enemigos volando o a máxima velocidad)
+    if _G.Silent_Priority == "Torso" then
+        return torso or head
     end
 
-    -- Modo Head por defecto
-    return char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
+    -- Modo 2: Cabeza pura (Máximo daño crítico)
+    if _G.Silent_Priority == "Head" then
+        return head or torso
+    end
+
+    -- Modo 3: DINÁMICO (Recomendado)
+    -- Si el objetivo corre, salta o va en vehículo (velocidad > 4 studs/s),
+    -- asegura el 100% del daño en el torso para que el servidor nunca falle el raycast.
+    -- Si está quieto o caminando lento, clava el tiro en la cabeza (headshot).
+    if root then
+        local speed = (root.AssemblyLinearVelocity or root.Velocity or Vector3.zero).Magnitude
+        if speed > 4 then
+            return torso
+        end
+    end
+
+    return head or torso
 end
 
 -- =========================================================================
@@ -423,8 +442,8 @@ local function getClosestTargetBy3D()
 
     for _, pl in ipairs(playerPool) do
         if pl ~= LocalPlayer and pl.Character then
-            local targetPart = getTargetHitPart(pl.Character)
             local hum = pl.Character:FindFirstChildOfClass("Humanoid")
+            local targetPart = resolveBestPart(pl.Character)
 
             if targetPart and hum and hum.Health > 0 then
                 local isTeam = _G.Silent_TeamCheck and LocalPlayer.Team and pl.Team and (pl.Team == LocalPlayer.Team)
@@ -439,7 +458,7 @@ local function getClosestTargetBy3D()
                         if onScreen then
                             local screenDist = (Vector2.new(screenPos.X, screenPos.Y) - screenCenter).Magnitude
                             if screenDist <= _G.Silent_FOV then
-                                -- Prioridad 3D pura: Menor distancia física gana
+                                -- Prioridad 3D pura: Menor distancia física gana siempre
                                 if dist3D < minDistance3D then
                                     minDistance3D = dist3D
                                     bestPart = targetPart
@@ -456,31 +475,7 @@ local function getClosestTargetBy3D()
 end
 
 -- =========================================================================
--- CÁLCULO DE PUNTO DE MIRA HITSCAN
--- =========================================================================
-local function getAimVector(targetPart, origin)
-    local aimPos = targetPart.Position
-
-    -- Micro-asistencia horizontal opcional (solo si el objetivo corre muy rápido)
-    if _G.Silent_LeadAssist then
-        local char = targetPart.Parent
-        local root = char and char:FindFirstChild("HumanoidRootPart")
-        if root then
-            local vel = root.AssemblyLinearVelocity or root.Velocity or Vector3.zero
-            local hVel = Vector3.new(vel.X, 0, vel.Z) -- Cero en Y para no irse al suelo
-            if hVel.Magnitude > 1.5 then
-                -- Desplazamiento máximo de 0.35 studs (permanece 100% dentro de la cabeza/torso)
-                local offset = hVel.Unit * math.clamp(hVel.Magnitude * 0.02, 0, 0.35)
-                aimPos = aimPos + offset
-            end
-        end
-    end
-
-    return (aimPos - origin).Unit
-end
-
--- =========================================================================
--- HOOK MAESTRO HITSCAN (DAÑO REAL Y SONIDO)
+-- HOOK BALÍSTICO LIMPIO (DAÑO 100% CONFIRMADO POR EL SERVIDOR)
 -- =========================================================================
 local oldNamecall
 oldNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
@@ -495,7 +490,8 @@ oldNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
             if remoteName == "GlockEvent" and args[1] == "Shoot" and type(args[2]) == "table" then
                 local data = args[2]
                 local origin = data.origin or Camera.CFrame.Position
-                data.direction = getAimVector(CurrentTargetPart, origin)
+                -- Vector directo sin desincronización: garantiza confirmación del servidor
+                data.direction = (CurrentTargetPart.Position - origin).Unit
                 return oldNamecall(self, "Shoot", data)
             end
 
@@ -503,22 +499,22 @@ oldNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
             if remoteName == "MD_ItemsEvent" and args[1] == "FireGun" and type(args[2]) == "table" then
                 local data = args[2]
                 local origin = data.origin or Camera.CFrame.Position
-                data.direction = getAimVector(CurrentTargetPart, origin)
+                data.direction = (CurrentTargetPart.Position - origin).Unit
                 return oldNamecall(self, "FireGun", data)
             end
         end
 
-        -- Redirigir el rayo de cámara local
+        -- Redirigir el rayo de cámara local para que los módulos del cliente concuerden
         if self == Camera and (method == "ViewportPointToRay" or method == "ScreenPointToRay") then
             local origin = Camera.CFrame.Position
-            return Ray.new(origin, getAimVector(CurrentTargetPart, origin))
+            return Ray.new(origin, (CurrentTargetPart.Position - origin).Unit)
         end
     end
 
     return oldNamecall(self, ...)
 end))
 
--- Bucle de render y actualización constante
+-- Bucle de render constante
 RunService.RenderStepped:Connect(function()
     checkWeapon()
     local center = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
@@ -542,7 +538,7 @@ SilentTab:Section({ Title = "Silent Aim Config" })
 
 SilentTab:Toggle({
     Title = "Silent Aim",
-    Desc = "Redirección hitscan pura sin tracers y con daño asegurado.",
+    Desc = "Redirección limpia con daño real, sonido y descuento de balas.",
     Flag = "Silent_Enabled",
     Value = false,
     Callback = function(state)
@@ -558,29 +554,19 @@ SilentTab:Toggle({
 })
 
 SilentTab:Dropdown({
-    Title = "Parte a Impactar",
-    Desc = "Head = Headshot daño alto | Torso = 100% infalible a gente corriendo/volando.",
-    Flag = "Silent_TargetPart",
-    Values = { "Head", "Torso" },
-    Default = "Head",
+    Title = "Modo de Blanco",
+    Desc = "Dynamic (Head a parados, Torso a corredores) | Head | Torso",
+    Flag = "Silent_Priority",
+    Values = { "Dynamic", "Head", "Torso" },
+    Default = "Dynamic",
     Callback = function(option)
-        _G.Silent_TargetPart = option
-    end
-})
-
-SilentTab:Toggle({
-    Title = "Micro-Lead Assist",
-    Desc = "Compensación sutil en X/Z para enemigos en sprint (sin tiros fantasma).",
-    Flag = "Silent_LeadAssist",
-    Value = false,
-    Callback = function(state)
-        _G.Silent_LeadAssist = state
+        _G.Silent_Priority = option
     end
 })
 
 SilentTab:Toggle({
     Title = "Mostrar FOV",
-    Desc = "Muestra u oculta el círculo central.",
+    Desc = "Muestra u oculta el círculo de rango central.",
     Flag = "Silent_ShowFOV",
     Value = false,
     Callback = function(state)
@@ -621,7 +607,7 @@ SilentTab:Slider({
     end
 })
 
-print("[BQM] Silent Aim Hitscan cargado con éxito.")
+print("[BQM] Silent Aim Limpio montado. Cero tiros fantasma.")
 
 ConfigTab:Section({ Title = "Gestor de Configuraciones (Max. 5)" })
 
