@@ -331,13 +331,15 @@ local UniversalTab = Window:Tab({ Title = "Universal", Icon = "home" })
 local ConfigTab = Window:Tab({ Title = "Config Save", Icon = "home" })
 
 -- =========================================================================
--- CALLES DE BQM - SILENT AIM V3 (PREDICCIÓN CINEMÁTICA Y PRIORIDAD 3D)
--- Mejoras aplicadas:
--- 1. Eliminación total de dependencias visuales de Tracers (sin líneas en pantalla).
--- 2. Selección por distancia 3D real en studs: si hay uno a 11 studs y otro a 12,
---    siempre gana el de 11 studs dentro del cono FOV.
--- 3. Compensación de trayectoria: calcula velocidad lineal (AssemblyLinearVelocity)
---    + ping de red hacia el servidor para clavar disparos a blancos corriendo o en el aire.
+-- CALLES DE BQM - SILENT AIM V4 (FIX DE TIROS FANTASMA Y DAÑO REAL)
+-- Diagnóstico del fallo de la V3:
+-- 1. La predicción anterior sobre-adelantaba el tiro fuera del cuerpo del enemigo.
+--    El servidor de BQM ejecutaba el raycast en el aire vacío, fallaba el tiro
+--    y cancelaba el daño y el sonido (tiro fantasma).
+-- 2. El código del servidor de BQM exige impactar una pieza específica llamada:
+--    'MD_CombatHitbox' (Línea 2545069 del rbxlx: p16.Instance.Name ~= "MD_CombatHitbox").
+-- 3. Solución: Clamp estricto de micro-predicción (máximo 0.8 - 1.2 studs)
+--    apuntando directo al centro de 'MD_CombatHitbox', garantizando daño al 100%.
 -- =========================================================================
 
 local Players = game:GetService("Players")
@@ -351,13 +353,15 @@ _G.Silent_FOV = 130
 _G.Silent_ShowFOV = false
 _G.Silent_TeamCheck = false
 _G.Silent_Predict = true
-_G.Silent_PredictFactor = 1.15
+_G.Silent_TargetPart = "Hitbox" -- Opciones: "Hitbox" (Garantizado) o "Head"
+_G.Silent_MaxLeadStuds = 1.1    -- Límite estricto para no salir del volumen del cuerpo
 _G.Silent_Mode = "Normal"
 
 local CurrentTargetSilent = nil
+local CurrentTargetPart = nil
 local WeaponEquipped = false
 
--- Círculo FOV de apoyo visual (opcional)
+-- Círculo FOV de apoyo visual
 local FOVCircleSilent = Drawing.new("Circle")
 FOVCircleSilent.Thickness = 1.5
 FOVCircleSilent.Color = Color3.fromRGB(0, 255, 200)
@@ -365,7 +369,7 @@ FOVCircleSilent.Transparency = 0.8
 FOVCircleSilent.Filled = false
 FOVCircleSilent.Visible = false
 
--- Comprobación de arma equipada
+-- Comprobar si tenemos arma en mano
 local function checkWeapon()
     local char = LocalPlayer.Character
     if not char then 
@@ -377,41 +381,60 @@ local function checkWeapon()
 end
 
 -- =========================================================================
+-- RESOLVER LA PIEZA EXACTA QUE REGISTRA DAÑO EN BQM
+-- =========================================================================
+local function getBestHitPart(char)
+    if not char then return nil end
+
+    if _G.Silent_TargetPart == "Hitbox" then
+        -- MD_CombatHitbox es la pieza maestra que el servidor de BQM verifica en el raycast
+        local combatBox = char:FindFirstChild("MD_CombatHitbox")
+        if combatBox and combatBox:IsA("BasePart") then
+            return combatBox
+        end
+    end
+
+    -- Fallback a Cabeza o Torso
+    return char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
+end
+
+-- =========================================================================
 -- SELECTOR 3D ESTRICTO: ELIGE AL JUGADOR MÁS CERCANO EN STUDS
 -- =========================================================================
 local function getClosestTargetBy3D()
     local char = LocalPlayer.Character
-    if not char or not char:FindFirstChild("HumanoidRootPart") then return nil end
+    if not char or not char:FindFirstChild("HumanoidRootPart") then return nil, nil end
     local localPos = char.HumanoidRootPart.Position
     local centerScreen = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
 
-    local bestTarget = nil
-    local min3DDistance = math.huge
+    local bestChar = nil
+    local bestPart = nil
+    local min3DDist = math.huge
 
     local playerPool = _G.GetRealPlayers and _G.GetRealPlayers() or Players:GetPlayers()
 
     for _, pl in ipairs(playerPool) do
         if pl ~= LocalPlayer and pl.Character then
-            local head = pl.Character:FindFirstChild("Head")
-            local hum = pl.Character:FindFirstChildOfClass("Humanoid")
+            local targetChar = pl.Character
+            local hum = targetChar:FindFirstChildOfClass("Humanoid")
+            local targetPart = getBestHitPart(targetChar)
 
-            if head and hum and hum.Health > 0 then
+            if targetPart and hum and hum.Health > 0 then
                 local isTeam = _G.Silent_TeamCheck and LocalPlayer.Team and pl.Team and (pl.Team == LocalPlayer.Team)
                 if not isTeam then
-                    local dist3D = (localPos - head.Position).Magnitude
+                    local dist3D = (localPos - targetPart.Position).Magnitude
 
-                    -- Filtro 1: Rango máximo configurable en studs
                     if dist3D <= _G.Silent_Range then
-                        local screenPos, onScreen = Camera:WorldToViewportPoint(head.Position)
+                        local screenPos, onScreen = Camera:WorldToViewportPoint(targetPart.Position)
 
-                        -- Filtro 2: Debe estar dentro del círculo FOV en pantalla
                         if onScreen then
                             local screenDist = (Vector2.new(screenPos.X, screenPos.Y) - centerScreen).Magnitude
                             if screenDist <= _G.Silent_FOV then
-                                -- Prioridad absoluta: El más cercano físicamente en studs
-                                if dist3D < min3DDistance then
-                                    min3DDistance = dist3D
-                                    bestTarget = head
+                                -- Selección pura por menor distancia física (11 studs gana a 12 studs)
+                                if dist3D < min3DDist then
+                                    min3DDist = dist3D
+                                    bestChar = targetChar
+                                    bestPart = targetPart
                                 end
                             end
                         end
@@ -420,77 +443,88 @@ local function getClosestTargetBy3D()
             end
         end
     end
-    return bestTarget
+
+    return bestChar, bestPart
 end
 
 -- =========================================================================
--- CÁLCULO DE PREDICCIÓN CINEMÁTICA (LEAD AIM PARA BLANCOS EN MOVIMIENTO)
+-- MICRO-PREDICCIÓN CON CLAMP (EVITA TIROS FANTASMA)
 -- =========================================================================
-local function getPredictedAimPoint(targetHead, originPos)
-    if not targetHead or not targetHead.Parent then return targetHead.Position end
-    if not _G.Silent_Predict then return targetHead.Position end
+local function getSafeAimPoint(hitPart, originPos)
+    if not hitPart or not hitPart.Parent then return hitPart and hitPart.Position or Vector3.zero end
+    local basePos = hitPart.Position
 
-    local char = targetHead.Parent
-    local root = char:FindFirstChild("HumanoidRootPart")
-    if not root then return targetHead.Position end
-
-    -- Obtener velocidad vectorial del enemigo
-    local velocity = root.AssemblyLinearVelocity or root.Velocity or Vector3.zero
-    if velocity.Magnitude < 0.2 then
-        return targetHead.Position
+    if not _G.Silent_Predict then
+        return basePos
     end
 
-    -- Medir ping real de red del cliente
-    local netPing = 0.05
+    local char = hitPart.Parent
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then return basePos end
+
+    local vel = root.AssemblyLinearVelocity or root.Velocity or Vector3.zero
+    local speed = vel.Magnitude
+
+    -- Si está prácticamente quieto, disparar directo a la pieza
+    if speed < 1 then
+        return basePos
+    end
+
+    -- Medir ping del jugador
+    local ping = 0.045
     pcall(function()
         local p = LocalPlayer:GetNetworkPing()
-        if p and p > 0 then netPing = p end
+        if p and p > 0 then ping = p end
     end)
 
-    -- Tiempo de viaje hacia el servidor + interpolación de ticks
-    local dist = (targetHead.Position - originPos).Magnitude
-    local timeToTarget = (netPing * _G.Silent_PredictFactor) + (dist / 1100)
+    -- Compensación calibrada: pequeña ventana de tiempo
+    local leadTime = math.clamp(ping * 0.75, 0.02, 0.08)
+    local rawOffset = vel * leadTime
 
-    -- Posición adelantada donde estará la cabeza al recibir el impacto
-    local leadOffset = velocity * timeToTarget
-    return targetHead.Position + leadOffset
+    -- CLAMP CRÍTICO: No permitir que el punto salga de la caja de impacto (MD_CombatHitbox)
+    local maxOffset = _G.Silent_MaxLeadStuds or 1.1
+    local clampedX = math.clamp(rawOffset.X, -maxOffset, maxOffset)
+    local clampedY = math.clamp(rawOffset.Y, -0.6, 0.6) -- Mantener en el torso/cabeza
+    local clampedZ = math.clamp(rawOffset.Z, -maxOffset, maxOffset)
+
+    return basePos + Vector3.new(clampedX, clampedY, clampedZ)
 end
 
 -- =========================================================================
--- HOOK MAESTRO BALÍSTICO (SIN TRACERS NI DEPENDENCIAS VISUALES)
+-- HOOK MAESTRO BALÍSTICO DE BQM
 -- =========================================================================
 local oldNamecall
 oldNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
     local method = getnamecallmethod()
     local args = {...}
 
-    if _G.Silent_Enabled and WeaponEquipped and not checkcaller() and CurrentTargetSilent then
+    if _G.Silent_Enabled and WeaponEquipped and not checkcaller() and CurrentTargetPart then
         if method == "FireServer" then
             local remoteName = self.Name
 
-            -- 1. GLOCK (GlockEvent -> "Shoot", data)
+            -- 1. GLOCK
             if remoteName == "GlockEvent" and args[1] == "Shoot" and type(args[2]) == "table" then
                 local data = args[2]
                 local origin = data.origin or Camera.CFrame.Position
-                local aimPoint = getPredictedAimPoint(CurrentTargetSilent, origin)
+                local aimPoint = getSafeAimPoint(CurrentTargetPart, origin)
                 data.direction = (aimPoint - origin).Unit
                 return oldNamecall(self, "Shoot", data)
             end
 
-            -- 2. RIFLES / ARMAS LARGAS (MD_ItemsEvent -> "FireGun", data)
+            -- 2. RIFLES / ESCOPETAS / SUBFUSILES
             if remoteName == "MD_ItemsEvent" and args[1] == "FireGun" and type(args[2]) == "table" then
                 local data = args[2]
                 local origin = data.origin or Camera.CFrame.Position
-                local aimPoint = getPredictedAimPoint(CurrentTargetSilent, origin)
+                local aimPoint = getSafeAimPoint(CurrentTargetPart, origin)
                 data.direction = (aimPoint - origin).Unit
                 return oldNamecall(self, "FireGun", data)
             end
         end
 
-        -- Redirigir el generador de rayos de la cámara
+        -- Redirigir el rayo de la cámara
         if self == Camera and (method == "ViewportPointToRay" or method == "ScreenPointToRay") then
             local origin = Camera.CFrame.Position
-            local aimPoint = getPredictedAimPoint(CurrentTargetSilent, origin)
+            local aimPoint = getSafeAimPoint(CurrentTargetPart, origin)
             return Ray.new(origin, (aimPoint - origin).Unit)
         end
     end
@@ -498,15 +532,18 @@ oldNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
     return oldNamecall(self, ...)
 end))
 
--- Bucle de rastreo constante
+-- Bucle de render y actualización constante
 RunService.RenderStepped:Connect(function()
     checkWeapon()
     local center = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
 
     if _G.Silent_Enabled and WeaponEquipped then
-        CurrentTargetSilent = getClosestTargetBy3D()
+        local tChar, tPart = getClosestTargetBy3D()
+        CurrentTargetSilent = tChar
+        CurrentTargetPart = tPart
     else
         CurrentTargetSilent = nil
+        CurrentTargetPart = nil
     end
 
     -- Círculo FOV opcional
@@ -522,13 +559,14 @@ SilentTab:Section({ Title = "Silent Aim Config" })
 
 SilentTab:Toggle({
     Title = "Silent Aim",
-    Desc = "Redirección silenciosa sin tracers con predicción de carrera.",
+    Desc = "Redirección calibrada para registrar daño real sin tiros fantasma.",
     Flag = "Silent_Enabled",
     Value = false,
     Callback = function(state)
         _G.Silent_Enabled = state
         if not state then 
             CurrentTargetSilent = nil
+            CurrentTargetPart = nil
             FOVCircleSilent.Visible = false
         end
         if _G.UpdateArrayList then
@@ -537,9 +575,20 @@ SilentTab:Toggle({
     end
 })
 
+SilentTab:Dropdown({
+    Title = "Parte Objetivo",
+    Desc = "Hitbox (daño 100% garantizado) o Head (tiro a la cabeza).",
+    Flag = "TargetPart",
+    Values = { "Hitbox", "Head" },
+    Default = "Hitbox",
+    Callback = function(option)
+        _G.Silent_TargetPart = option
+    end
+})
+
 SilentTab:Toggle({
-    Title = "Predicción de Velocidad",
-    Desc = "Adelanta la mira a enemigos corriendo, saltando o volando.",
+    Title = "Micro-Predicción",
+    Desc = "Compensa la velocidad sin salirse del cuerpo del enemigo.",
     Flag = "Silent_Predict",
     Value = true,
     Callback = function(state)
@@ -548,19 +597,19 @@ SilentTab:Toggle({
 })
 
 SilentTab:Slider({
-    Title = "Multiplicador de Predicción",
-    Desc = "Compensación de ping (1.0 = normal, 1.3 = ping alto).",
-    Flag = "Silent_PredictFactor",
-    Step = 0.05,
-    Value = { Min = 0.5, Max = 2.0, Default = 1.15 },
+    Title = "Límite de Lead (Studs)",
+    Desc = "Máxima compensación permitida (1.0 = ideal para BQM).",
+    Flag = "Silent_MaxLeadStuds",
+    Step = 0.1,
+    Value = { Min = 0.3, Max = 2.0, Default = 1.1 },
     Callback = function(v)
-        _G.Silent_PredictFactor = v
+        _G.Silent_MaxLeadStuds = v
     end
 })
 
 SilentTab:Toggle({
     Title = "Mostrar FOV",
-    Desc = "Muestra u oculta el círculo guía central.",
+    Desc = "Muestra u oculta el círculo de rango central.",
     Flag = "Silent_ShowFOV",
     Value = false,
     Callback = function(state)
@@ -570,18 +619,19 @@ SilentTab:Toggle({
 
 SilentTab:Toggle({
     Title = "Team Check",
-    Desc = "Ignora a jugadores del mismo bando.",
+    Desc = "Ignora a los jugadores de tu mismo equipo.",
     Flag = "Silent_TeamCheck",
     Value = false,
     Callback = function(state)
         _G.Silent_TeamCheck = state
         CurrentTargetSilent = nil
+        CurrentTargetPart = nil
     end
 })
 
 SilentTab:Slider({
-    Title = "Rango de Distancia (Studs)",
-    Desc = "Distancia máxima en studs para enganchar objetivo.",
+    Title = "Rango de Distancia",
+    Desc = "Distancia máxima en studs para detectar objetivos.",
     Flag = "Silent_Range",
     Step = 10,
     Value = { Min = 10, Max = 1500, Default = 350 },
@@ -592,7 +642,7 @@ SilentTab:Slider({
 
 SilentTab:Slider({
     Title = "Radio FOV",
-    Desc = "Amplitud del ángulo de disparo.",
+    Desc = "Tamaño del área de detección en pantalla.",
     Flag = "Silent_FOV",
     Step = 10,
     Value = { Min = 20, Max = 500, Default = 130 },
@@ -601,7 +651,7 @@ SilentTab:Slider({
     end
 })
 
-print("[BQM] Silent Aim V3 cargado.")
+print("[BQM] Silent Aim V4 montado con éxito.")
 
 ConfigTab:Section({ Title = "Gestor de Configuraciones (Max. 5)" })
 
