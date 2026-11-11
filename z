@@ -331,33 +331,33 @@ local UniversalTab = Window:Tab({ Title = "Universal", Icon = "home" })
 local ConfigTab = Window:Tab({ Title = "Config Save", Icon = "home" })
 
 -- =========================================================================
--- CALLES DE BQM - SILENT AIM CORREGIDO (MOTOR BALÍSTICO MD_Fresh)
--- Causa del fallo original descubierta en el .rbxlx:
--- Las armas en BQM NO usan workspace:Raycast para registrar el daño en el servidor.
--- Generan un rayo con Camera:ViewportPointToRay / ScreenPointToRay y envían una tabla:
--- { origin = Vector3, direction = Vector3, cameraOffset = Vector3, shotAt = ..., shotId = ... }
--- a través de 'GlockEvent:FireServer("Shoot", data)' o 'MD_ItemsEvent:FireServer("FireGun", data)'.
--- Hookear workspace:Raycast solo cambiaba la línea visual de humo; el servidor
--- seguía recibiendo la dirección original hacia donde apuntaba la mira.
+-- CALLES DE BQM - SILENT AIM V3 (PREDICCIÓN CINEMÁTICA Y PRIORIDAD 3D)
+-- Mejoras aplicadas:
+-- 1. Eliminación total de dependencias visuales de Tracers (sin líneas en pantalla).
+-- 2. Selección por distancia 3D real en studs: si hay uno a 11 studs y otro a 12,
+--    siempre gana el de 11 studs dentro del cono FOV.
+-- 3. Compensación de trayectoria: calcula velocidad lineal (AssemblyLinearVelocity)
+--    + ping de red hacia el servidor para clavar disparos a blancos corriendo o en el aire.
 -- =========================================================================
 
 local Players = game:GetService("Players")
-local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
 local Camera = workspace.CurrentCamera
 local LocalPlayer = Players.LocalPlayer
 
 _G.Silent_Enabled = false
-_G.Silent_Range = 300
-_G.Silent_FOV = 150
+_G.Silent_Range = 350
+_G.Silent_FOV = 130
 _G.Silent_ShowFOV = false
 _G.Silent_TeamCheck = false
+_G.Silent_Predict = true
+_G.Silent_PredictFactor = 1.15
 _G.Silent_Mode = "Normal"
 
 local CurrentTargetSilent = nil
 local WeaponEquipped = false
 
--- Círculo FOV
+-- Círculo FOV de apoyo visual (opcional)
 local FOVCircleSilent = Drawing.new("Circle")
 FOVCircleSilent.Thickness = 1.5
 FOVCircleSilent.Color = Color3.fromRGB(0, 255, 200)
@@ -365,51 +365,7 @@ FOVCircleSilent.Transparency = 0.8
 FOVCircleSilent.Filled = false
 FOVCircleSilent.Visible = false
 
--- Línea Tracer al blanco
-local TracerSilent = Drawing.new("Line")
-TracerSilent.Thickness = 1.5
-TracerSilent.Color = Color3.fromRGB(255, 50, 50)
-TracerSilent.Visible = false
-
--- Función para buscar el objetivo más cercano a la mira
-local function getClosestTargetSilent()
-    local centerPos = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
-    local char = LocalPlayer.Character
-    if not char or not char:FindFirstChild("HumanoidRootPart") then return nil end
-    local localPos = char.HumanoidRootPart.Position
-
-    local closest = nil
-    local minDist = math.huge
-
-    local targetList = _G.GetRealPlayers and _G.GetRealPlayers() or Players:GetPlayers()
-
-    for _, pl in ipairs(targetList) do
-        if pl ~= LocalPlayer and pl.Character then
-            local head = pl.Character:FindFirstChild("Head")
-            local hum = pl.Character:FindFirstChildOfClass("Humanoid")
-
-            if head and hum and hum.Health > 0 then
-                local isTeam = _G.Silent_TeamCheck and LocalPlayer.Team and pl.Team and (pl.Team == LocalPlayer.Team)
-                if not isTeam then
-                    local dist = (localPos - head.Position).Magnitude
-                    if dist <= _G.Silent_Range then
-                        local sp, onScreen = Camera:WorldToViewportPoint(head.Position)
-                        if onScreen then
-                            local screenDist = (Vector2.new(sp.X, sp.Y) - centerPos).Magnitude
-                            if screenDist <= _G.Silent_FOV and screenDist < minDist then
-                                minDist = screenDist
-                                closest = head
-                            end
-                        end
-                    end
-                end
-            end
-        end
-    end
-    return closest
-end
-
--- Comprobar si tenemos arma en mano
+-- Comprobación de arma equipada
 local function checkWeapon()
     local char = LocalPlayer.Character
     if not char then 
@@ -421,102 +377,158 @@ local function checkWeapon()
 end
 
 -- =========================================================================
--- HOOK MAESTRO: INTERCEPTA LA BALÍSTICA DE BQM (GlockEvent y MD_ItemsEvent)
--- Y REDIRIGE Camera:ViewportPointToRay / ScreenPointToRay
+-- SELECTOR 3D ESTRICTO: ELIGE AL JUGADOR MÁS CERCANO EN STUDS
+-- =========================================================================
+local function getClosestTargetBy3D()
+    local char = LocalPlayer.Character
+    if not char or not char:FindFirstChild("HumanoidRootPart") then return nil end
+    local localPos = char.HumanoidRootPart.Position
+    local centerScreen = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+
+    local bestTarget = nil
+    local min3DDistance = math.huge
+
+    local playerPool = _G.GetRealPlayers and _G.GetRealPlayers() or Players:GetPlayers()
+
+    for _, pl in ipairs(playerPool) do
+        if pl ~= LocalPlayer and pl.Character then
+            local head = pl.Character:FindFirstChild("Head")
+            local hum = pl.Character:FindFirstChildOfClass("Humanoid")
+
+            if head and hum and hum.Health > 0 then
+                local isTeam = _G.Silent_TeamCheck and LocalPlayer.Team and pl.Team and (pl.Team == LocalPlayer.Team)
+                if not isTeam then
+                    local dist3D = (localPos - head.Position).Magnitude
+
+                    -- Filtro 1: Rango máximo configurable en studs
+                    if dist3D <= _G.Silent_Range then
+                        local screenPos, onScreen = Camera:WorldToViewportPoint(head.Position)
+
+                        -- Filtro 2: Debe estar dentro del círculo FOV en pantalla
+                        if onScreen then
+                            local screenDist = (Vector2.new(screenPos.X, screenPos.Y) - centerScreen).Magnitude
+                            if screenDist <= _G.Silent_FOV then
+                                -- Prioridad absoluta: El más cercano físicamente en studs
+                                if dist3D < min3DDistance then
+                                    min3DDistance = dist3D
+                                    bestTarget = head
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return bestTarget
+end
+
+-- =========================================================================
+-- CÁLCULO DE PREDICCIÓN CINEMÁTICA (LEAD AIM PARA BLANCOS EN MOVIMIENTO)
+-- =========================================================================
+local function getPredictedAimPoint(targetHead, originPos)
+    if not targetHead or not targetHead.Parent then return targetHead.Position end
+    if not _G.Silent_Predict then return targetHead.Position end
+
+    local char = targetHead.Parent
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then return targetHead.Position end
+
+    -- Obtener velocidad vectorial del enemigo
+    local velocity = root.AssemblyLinearVelocity or root.Velocity or Vector3.zero
+    if velocity.Magnitude < 0.2 then
+        return targetHead.Position
+    end
+
+    -- Medir ping real de red del cliente
+    local netPing = 0.05
+    pcall(function()
+        local p = LocalPlayer:GetNetworkPing()
+        if p and p > 0 then netPing = p end
+    end)
+
+    -- Tiempo de viaje hacia el servidor + interpolación de ticks
+    local dist = (targetHead.Position - originPos).Magnitude
+    local timeToTarget = (netPing * _G.Silent_PredictFactor) + (dist / 1100)
+
+    -- Posición adelantada donde estará la cabeza al recibir el impacto
+    local leadOffset = velocity * timeToTarget
+    return targetHead.Position + leadOffset
+end
+
+-- =========================================================================
+-- HOOK MAESTRO BALÍSTICO (SIN TRACERS NI DEPENDENCIAS VISUALES)
 -- =========================================================================
 local oldNamecall
 oldNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
     local method = getnamecallmethod()
     local args = {...}
 
-    if _G.Silent_Enabled and not checkcaller() and CurrentTargetSilent then
-        -- [1] REDIRECCIÓN EN EL REMOTE DEL SERVIDOR (Daño Real)
+    if _G.Silent_Enabled and WeaponEquipped and not checkcaller() and CurrentTargetSilent then
         if method == "FireServer" then
             local remoteName = self.Name
-            
-            -- Glock (GlockEvent -> "Shoot", predictionTable)
+
+            -- 1. GLOCK (GlockEvent -> "Shoot", data)
             if remoteName == "GlockEvent" and args[1] == "Shoot" and type(args[2]) == "table" then
                 local data = args[2]
                 local origin = data.origin or Camera.CFrame.Position
-                data.direction = (CurrentTargetSilent.Position - origin).Unit
+                local aimPoint = getPredictedAimPoint(CurrentTargetSilent, origin)
+                data.direction = (aimPoint - origin).Unit
                 return oldNamecall(self, "Shoot", data)
             end
 
-            -- Resto de armas: AK47, AWP, M16, P90, etc. (MD_ItemsEvent -> "FireGun", predictionTable)
+            -- 2. RIFLES / ARMAS LARGAS (MD_ItemsEvent -> "FireGun", data)
             if remoteName == "MD_ItemsEvent" and args[1] == "FireGun" and type(args[2]) == "table" then
                 local data = args[2]
                 local origin = data.origin or Camera.CFrame.Position
-                data.direction = (CurrentTargetSilent.Position - origin).Unit
+                local aimPoint = getPredictedAimPoint(CurrentTargetSilent, origin)
+                data.direction = (aimPoint - origin).Unit
                 return oldNamecall(self, "FireGun", data)
             end
         end
 
-        -- [2] REDIRECCIÓN DE RAYOS DE CÁMARA (Para MD_TracerVisual y visuales)
+        -- Redirigir el generador de rayos de la cámara
         if self == Camera and (method == "ViewportPointToRay" or method == "ScreenPointToRay") then
             local origin = Camera.CFrame.Position
-            local dir = (CurrentTargetSilent.Position - origin).Unit
-            return Ray.new(origin, dir)
-        end
-
-        -- [3] REDIRECCIÓN POR RAYCAST TRADICIONAL (Fallback)
-        if self == workspace and method == "Raycast" then
-            local origin = args[1]
-            if typeof(origin) == "Vector3" then
-                args[2] = (CurrentTargetSilent.Position - origin).Unit * 500
-                return oldNamecall(self, unpack(args))
-            end
+            local aimPoint = getPredictedAimPoint(CurrentTargetSilent, origin)
+            return Ray.new(origin, (aimPoint - origin).Unit)
         end
     end
 
     return oldNamecall(self, ...)
 end))
 
--- Bucle de render y actualización de objetivo
+-- Bucle de rastreo constante
 RunService.RenderStepped:Connect(function()
     checkWeapon()
     local center = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
 
     if _G.Silent_Enabled and WeaponEquipped then
-        CurrentTargetSilent = getClosestTargetSilent()
+        CurrentTargetSilent = getClosestTargetBy3D()
     else
         CurrentTargetSilent = nil
     end
 
-    -- Actualizar Círculo FOV
+    -- Círculo FOV opcional
     FOVCircleSilent.Position = center
     FOVCircleSilent.Radius = _G.Silent_FOV
     FOVCircleSilent.Visible = _G.Silent_Enabled and _G.Silent_ShowFOV
-
-    -- Actualizar Línea al Blanco
-    if CurrentTargetSilent and _G.Silent_Enabled then
-        local sp, onScreen = Camera:WorldToViewportPoint(CurrentTargetSilent.Position)
-        if onScreen then
-            TracerSilent.From = center
-            TracerSilent.To = Vector2.new(sp.X, sp.Y)
-            TracerSilent.Visible = true
-        else
-            TracerSilent.Visible = false
-        end
-    else
-        TracerSilent.Visible = false
-    end
 end)
 
 -- -------------------------------------------------------------------------
--- INTEGRACIÓN A TU UI (SilentTab)
+-- CONFIGURACIÓN DE TU UI
 -- -------------------------------------------------------------------------
 SilentTab:Section({ Title = "Silent Aim Config" })
 
 SilentTab:Toggle({
     Title = "Silent Aim",
-    Desc = "Redirige los paquetes balísticos de BQM directamente a la cabeza.",
+    Desc = "Redirección silenciosa sin tracers con predicción de carrera.",
     Flag = "Silent_Enabled",
     Value = false,
     Callback = function(state)
         _G.Silent_Enabled = state
         if not state then 
             CurrentTargetSilent = nil
-            TracerSilent.Visible = false
             FOVCircleSilent.Visible = false
         end
         if _G.UpdateArrayList then
@@ -525,20 +537,30 @@ SilentTab:Toggle({
     end
 })
 
-SilentTab:Dropdown({
-    Title = "Modo Silent Aim",
-    Desc = "Selecciona el modo de funcionamiento.",
-    Flag = "MoDo",
-    Values = { "Normal", "Insta" },
-    Default = "Normal",
-    Callback = function(option)
-        _G.Silent_Mode = option
+SilentTab:Toggle({
+    Title = "Predicción de Velocidad",
+    Desc = "Adelanta la mira a enemigos corriendo, saltando o volando.",
+    Flag = "Silent_Predict",
+    Value = true,
+    Callback = function(state)
+        _G.Silent_Predict = state
+    end
+})
+
+SilentTab:Slider({
+    Title = "Multiplicador de Predicción",
+    Desc = "Compensación de ping (1.0 = normal, 1.3 = ping alto).",
+    Flag = "Silent_PredictFactor",
+    Step = 0.05,
+    Value = { Min = 0.5, Max = 2.0, Default = 1.15 },
+    Callback = function(v)
+        _G.Silent_PredictFactor = v
     end
 })
 
 SilentTab:Toggle({
     Title = "Mostrar FOV",
-    Desc = "Muestra u oculta el círculo de rango central.",
+    Desc = "Muestra u oculta el círculo guía central.",
     Flag = "Silent_ShowFOV",
     Value = false,
     Callback = function(state)
@@ -548,7 +570,7 @@ SilentTab:Toggle({
 
 SilentTab:Toggle({
     Title = "Team Check",
-    Desc = "Ignora a los jugadores de tu mismo equipo.",
+    Desc = "Ignora a jugadores del mismo bando.",
     Flag = "Silent_TeamCheck",
     Value = false,
     Callback = function(state)
@@ -558,11 +580,11 @@ SilentTab:Toggle({
 })
 
 SilentTab:Slider({
-    Title = "Rango de Distancia",
-    Desc = "Distancia máxima en studs para detectar objetivos.",
+    Title = "Rango de Distancia (Studs)",
+    Desc = "Distancia máxima en studs para enganchar objetivo.",
     Flag = "Silent_Range",
     Step = 10,
-    Value = { Min = 10, Max = 1500, Default = 300 },
+    Value = { Min = 10, Max = 1500, Default = 350 },
     Callback = function(v)
         _G.Silent_Range = v
     end
@@ -570,16 +592,16 @@ SilentTab:Slider({
 
 SilentTab:Slider({
     Title = "Radio FOV",
-    Desc = "Tamaño del área de detección central.",
+    Desc = "Amplitud del ángulo de disparo.",
     Flag = "Silent_FOV",
     Step = 10,
-    Value = { Min = 20, Max = 500, Default = 150 },
+    Value = { Min = 20, Max = 500, Default = 130 },
     Callback = function(v)
         _G.Silent_FOV = v
     end
 })
 
-print("[BQM] Silent Aim balístico montado.")
+print("[BQM] Silent Aim V3 cargado.")
 
 ConfigTab:Section({ Title = "Gestor de Configuraciones (Max. 5)" })
 
